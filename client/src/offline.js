@@ -236,8 +236,15 @@ async function migrateLegacy() {
 export function getQueue() {
   return memoryQueue.map(operationToView);
 }
+export function getQueueCounts(ops) {
+  return {
+    pending: ops.filter((o) => o.status !== 'conflicted').length,
+    conflicted: ops.filter((o) => o.status === 'conflicted').length,
+  };
+}
 export function getState() {
-  return { online: typeof navigator !== 'undefined' ? navigator.onLine : true, pending: memoryQueue.length, conflicted: memoryQueue.filter((o) => o.status === 'conflicted').length };
+  const counts = getQueueCounts(memoryQueue);
+  return { online: typeof navigator !== 'undefined' ? navigator.onLine : true, ...counts };
 }
 export function getConflicts() { return memoryQueue.filter((o) => o.status === 'conflicted').map(operationToView); }
 

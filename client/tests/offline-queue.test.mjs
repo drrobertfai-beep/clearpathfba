@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildOperation, legacyToOperation, operationToView, sortOps, dedupeOperations, buildEditOperation,
+  buildOperation, legacyToOperation, operationToView, sortOps, dedupeOperations, buildEditOperation, getQueueCounts,
 } from '../src/offline.js';
 
 const payload = {
@@ -160,4 +160,13 @@ test('edit operation carries optimistic concurrency base and starts pending', ()
   assert.equal(op.status, 'pending');
   assert.equal(op.body.base_updated_at, '2026-08-08 10:00:00');
   assert.equal(op.server_record, null);
+});
+
+test('queue state counts conflicted operations separately from pending sync', () => {
+  const counts = getQueueCounts([
+    { id: 'pending', status: 'pending' },
+    { id: 'conflicted', status: 'conflicted' },
+    { id: 'legacy', status: undefined },
+  ]);
+  assert.deepEqual(counts, { pending: 2, conflicted: 1 });
 });
