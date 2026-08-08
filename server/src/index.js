@@ -11,6 +11,7 @@ import { docxForReport, docxForBip, docxForCrisis, docxForDataSheet, docxForProg
 import { deidentify } from './deidentify.js';
 import { pdfForReport, pdfForBip, pdfForCrisis, pdfForDataSheet, pdfForProgressReport } from './pdf-export.js';
 import { assessmentExport, csvExport, importCsv } from './portability.js';
+import { mapClientToPatient, mapAssessmentToResources, bundleResources } from './fhir.js';
 import { logAudit, DOCUMENT_TYPE_LABELS, SIGNATORY_ROLE_LABELS, SIGN_OFF_STATUS_LABELS } from './audit.js';
 import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth, requireRole, ROLES, publicUser } from './auth.js';
 import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
@@ -299,6 +300,30 @@ app.get('/api/assessments/:id/export.csv', ah(async(req,res) => {
  res.set({'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="${name}.csv"`});res.send(out.csv);
 }));
 app.get('/api/assessments/:id/export.json', ah(async(req,res) => { const p=await assessmentExport(req.params.id);if(!p)return res.status(404).json({error:'Assessment not found.'});res.set('Content-Disposition',`attachment; filename="${req.query.deidentified==='true'?`Assessment_${req.params.id}`:`Assessment_${p.client?.first_name||'Client'}_${p.client?.last_name||''}`}.json"`);res.json(req.query.deidentified==='true'?deidentify(p):p); }));
+// --- HL7 FHIR R4 export (mapping lives in fhir.js) ---
+const fhirType = 'application/fhir+json; charset=utf-8';
+const fhirFile = (deid, parts) => `FHIR_${deid ? parts.deidName : parts.name}.json`.replace(/[^a-z0-9_.-]+/gi, '_');
+app.get('/api/clients/:id/export.fhir', ah(async(req,res) => {
+ const client=await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id); if(!client)return res.status(404).json({error:'Client not found.'});
+ const deid=req.query.deidentified==='true';
+ const bundle=bundleResources([mapClientToPatient(client,{deidentified:deid})],{deidentified:deid});
+ await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_exported',details:{label:`Exported client FHIR bundle${deid?' (de-identified)':''}`,entity:'client',id:client.id,format:'fhir',deidentified:deid}});
+ res.set({'Content-Type':fhirType,'Content-Disposition':`attachment; filename="${fhirFile(deid,{deidName:`Client_${client.id}`,name:`${client.first_name||'Client'}_${client.last_name||''}`})}"`});
+ res.send(JSON.stringify(bundle,null,2));
+}));
+app.get('/api/assessments/:id/export.fhir', ah(async(req,res) => {
+ const a=await db.prepare('SELECT * FROM assessments WHERE id=? AND deleted_at IS NULL').get(req.params.id); if(!a)return res.status(404).json({error:'Assessment not found.'});
+ const client=await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(a.client_id);
+ const behaviors=await db.prepare('SELECT * FROM target_behaviors WHERE assessment_id=? ORDER BY id').all(req.params.id);
+ const points=await db.prepare('SELECT * FROM data_points WHERE assessment_id=? ORDER BY recorded_at,id').all(req.params.id);
+ const deid=req.query.deidentified==='true';
+ const resources=[mapClientToPatient(client,{deidentified:deid}),...mapAssessmentToResources(a,client,behaviors,points,{deidentified:deid})];
+ const bundle=bundleResources(resources,{deidentified:deid});
+ await logAudit(db,{assessment_id:req.params.id,actor:auditActor(req),action:'assessment_exported',details:{label:`Exported assessment FHIR bundle${deid?' (de-identified)':''}`,entity:'assessment',id:req.params.id,format:'fhir',deidentified:deid}});
+ const date=String(a.assessment_date||new Date().toISOString()).slice(0,10);
+ res.set({'Content-Type':fhirType,'Content-Disposition':`attachment; filename="${fhirFile(deid,{deidName:`Assessment_${req.params.id}`,name:`Assessment_${client?.first_name||'Client'}_${client?.last_name||''}_${date}`})}"`});
+ res.send(JSON.stringify(bundle,null,2));
+}));
 app.post('/api/assessments/:id/import/csv', ah(async(req,res) => { const result=await importCsv(req.params.id,req.body);if(result.notFound)return res.status(404).json({error:'Assessment not found.'});if(result.error)return res.status(400).json({error:result.error});const insert=db.prepare('INSERT INTO data_points (assessment_id,target_behavior_id,recorded_at,setting,antecedent,behavior,consequence,measurement_type,value,notes) VALUES (?,?,?,?,?,?,?,?,?,?)');const tx=db.transaction(async rows=>{for(const x of rows)await insert.run(x.assessment_id,x.target_behavior_id,x.recorded_at,x.setting,x.antecedent,x.behavior,x.consequence,x.measurement_type,x.value,x.notes);});await tx(result.valid);await logAudit(db,{assessment_id:req.params.id,actor:auditActor(req),action:'data_points_imported',details:{label:`Imported ${result.valid.length} data points`,imported:result.valid.length,rejected_count:result.rejected.length}});res.json({imported:result.valid.length,rejected:result.rejected}); }));
 // --- FBA report ---
 app.get('/api/assessments/:id/report', ah(async (req, res) => {
