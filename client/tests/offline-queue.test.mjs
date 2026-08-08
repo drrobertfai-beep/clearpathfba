@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildOperation, legacyToOperation, operationToView, sortOps, dedupeOperations,
+  buildOperation, legacyToOperation, operationToView, sortOps, dedupeOperations, buildEditOperation,
 } from '../src/offline.js';
 
 const payload = {
@@ -153,4 +153,11 @@ test('dedupeOperations skips existing ids, malformed entries, and intra-list dup
   assert.equal(ops[1].endpoint, '/api/assessments/4/data-points');
   assert.deepEqual(dedupeOperations([], []), []);
   assert.deepEqual(dedupeOperations(undefined, []), []);
+});
+
+test('edit operation carries optimistic concurrency base and starts pending', () => {
+  const op = buildEditOperation({kind:'client', endpoint:'/api/clients/9', body:{first_name:'Mine'}, record:{id:9,updated_at:'2026-08-08 10:00:00'}, queued_at:'2026-08-08T11:00:00Z'});
+  assert.equal(op.status, 'pending');
+  assert.equal(op.body.base_updated_at, '2026-08-08 10:00:00');
+  assert.equal(op.server_record, null);
 });
