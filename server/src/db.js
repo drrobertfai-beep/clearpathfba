@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS progress_reports (
 CREATE INDEX IF NOT EXISTS idx_progress_reports_assessment ON progress_reports(assessment_id);
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
- role TEXT NOT NULL CHECK (role IN ('admin','bcba','specialist','staff','supervisor','guardian')), display_name TEXT,
+ role TEXT NOT NULL CHECK (role IN ('admin','bcba','specialist','staff','supervisor','guardian')), display_name TEXT, email TEXT UNIQUE,
  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -130,6 +130,7 @@ const migrations = {
   ['must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
   ['mfa_secret', 'TEXT'],
   ['mfa_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['email', 'TEXT'],
  ],
  target_behaviors: [
   ['safety_classification', "TEXT NOT NULL DEFAULT 'none'"],
