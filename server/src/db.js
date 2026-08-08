@@ -163,6 +163,21 @@ CREATE TABLE IF NOT EXISTS mfa_backup_codes (
  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id), code_hash TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
+CREATE TABLE IF NOT EXISTS subscriptions (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ user_id INTEGER NOT NULL REFERENCES users(id),
+ customer_id TEXT NOT NULL,
+ subscription_id TEXT UNIQUE NOT NULL,
+ plan_key TEXT NOT NULL,
+ plan_label TEXT,
+ quantity INTEGER NOT NULL DEFAULT 1,
+ status TEXT NOT NULL DEFAULT 'incomplete',
+ current_period_end TEXT,
+ cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
     `;
 
 // Postgres mirror of SQLITE_DDL. Type mapping notes:
@@ -278,6 +293,21 @@ CREATE TABLE IF NOT EXISTS mfa_backup_codes (
  id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), code_hash TEXT NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
+CREATE TABLE IF NOT EXISTS subscriptions (
+ id SERIAL PRIMARY KEY,
+ user_id INTEGER NOT NULL REFERENCES users(id),
+ customer_id TEXT NOT NULL,
+ subscription_id TEXT UNIQUE NOT NULL,
+ plan_key TEXT NOT NULL,
+ plan_label TEXT,
+ quantity INTEGER NOT NULL DEFAULT 1,
+ status TEXT NOT NULL DEFAULT 'incomplete',
+ current_period_end TIMESTAMPTZ,
+ cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
 `;
 
 // ---------------------------------------------------------------------------

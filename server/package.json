@@ -11,7 +11,8 @@
     "docx": "^9.7.1",
     "express": "^4.21.2",
     "pdfkit": "^0.19.1",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "stripe": "^22.4.0"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.7.0"
