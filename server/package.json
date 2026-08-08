@@ -1,1 +1,1 @@
-{"name":"clearpathfba-server","private":true,"type":"module","scripts":{"dev":"node --watch src/index.js","start":"node src/index.js"},"dependencies":{"better-sqlite3":"^11.7.0","cors":"^2.8.5","docx":"^9.7.1","express":"^4.21.2"}}
+{"name":"clearpathfba-server","private":true,"type":"module","scripts":{"dev":"node --watch src/index.js","start":"node src/index.js"},"dependencies":{"better-sqlite3":"^11.7.0","cors":"^2.8.5","docx":"^9.7.1","express":"^4.21.2","pdfkit":"^0.19.1"}}

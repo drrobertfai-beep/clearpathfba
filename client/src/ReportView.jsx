@@ -563,6 +563,16 @@ export default function ReportView({ doc, docType, onBack, onSwitch, onRefreshDo
  const [deid, setDeid] = useState(false);
  const switchDoc = (t) => { setDeid(false); onSwitch(t); };
  const toggleDeid = async (checked) => { setDeid(checked); try { await onSwitch(docType, checked); } catch (e) { setDeid(!checked); alert(e.message); } };
+ const downloadPdf = async () => {
+  setDownloading(true);
+  try {
+   const token = localStorage.getItem('clearpath_token');
+   const path = (docType === 'progress' ? `/api/progress-reports/${doc.id}.pdf` : `/api/assessments/${assessment.id}/${docType === 'report' ? 'report' : docType === 'dataSheet' ? 'data-sheet' : docType === 'crisis' ? 'crisis-plan' : 'bip'}.pdf`) + (deid ? '?deidentified=true' : '');
+   const r = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+   if (!r.ok) throw new Error('Unable to download PDF document.');
+   const u = URL.createObjectURL(await r.blob()); const a=document.createElement('a'); a.href=u; const m=(r.headers.get('Content-Disposition')||'').match(/filename=\"?([^\";]+)\"?/i); a.download=m?m[1]:'ClearPathFBA.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+  } catch(e) { alert(e.message); } finally { setDownloading(false); }
+ };
  const downloadWord = async () => {
   setDownloading(true);
   try {
@@ -587,7 +597,7 @@ export default function ReportView({ doc, docType, onBack, onSwitch, onRefreshDo
    <div className="report-toolbar no-print">
     <button className="link-back" onClick={onBack}>← Back to assessment</button>
     <button className="primary" onClick={() => window.print()}>🖨 Print / Save as PDF</button>
-    {(docType !== 'progress' || doc.id) && <button className="secondary" disabled={downloading} onClick={downloadWord}>{downloading ? 'Preparing…' : 'Download Word'}</button>}
+    {(docType !== 'progress' || doc.id) && <> <button className="secondary" disabled={downloading} onClick={downloadWord}>Download Word</button><button className="secondary" disabled={downloading} onClick={downloadPdf}>Download PDF</button></>}
     <label className="deid-toggle" title="Fetch a PHI-stripped copy (no client/assessor/signatory names, no DOB, no free-text notes)">
      <input type="checkbox" checked={deid} onChange={(e) => toggleDeid(e.target.checked)} /> De-identified
     </label>
