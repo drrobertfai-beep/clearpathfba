@@ -175,7 +175,7 @@ function validateBehavior(body) {
  return null;
 }
 // --- Clients (existing) ---
-app.get('/api/health', (_,res)=>res.json({ok:true}));
+app.get('/api/health', (_,res)=>res.json({ok:true, mode: db.mode}));
 app.get('/api/clients', ah(async(_,res)=>res.json((await select.all()).map(row))));
 app.get('/api/clients/:id', ah(async(req,res)=>{ const c=row(await db.prepare('SELECT id, first_name, last_name, date_of_birth, gender, consent_status, dbhds_flags, notes, created_at, updated_at FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id)); if(!c)return res.status(404).json({error:'Client not found.'}); res.json(c); }));
 app.post('/api/clients', ah(async(req,res)=>{const e=validate(req.body);if(e)return res.status(400).json({error:e});const b=req.body;const info=await db.prepare('INSERT INTO clients (first_name,last_name,date_of_birth,gender,consent_status,dbhds_flags,notes) VALUES (?,?,?,?,?,?,?)').run(clean(b.first_name),clean(b.last_name),b.date_of_birth||null,clean(b.gender)||null,b.consent_status||'not_started',JSON.stringify(b.dbhds_flags||{}),clean(b.notes)||null);const created=row(await db.prepare('SELECT * FROM clients WHERE id=?').get(info.lastInsertRowid));await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_created',details:{label:`Client created: ${created.first_name} ${created.last_name}`,entity:'client',id:created.id,changed:setFields(created,CLIENT_FIELDS)}});res.status(201).json(created);}));
@@ -508,7 +508,12 @@ app.get('/api/admin/audit-log', requireRole('admin'), ah(async (req, res) => {
  }));
 }));
 app.use((err,_,res,__)=>(console.error(err),res.status(500).json({error:'Internal server error.'})));
-async function start() {
+export { app };
+// Boot: wait for schema creation/migration (instant for SQLite, async for
+// Postgres) and seed the development accounts. Exported separately from
+// listen() so a serverless platform (Vercel) can await the same boot path
+// before serving requests — the API surface is identical either way.
+export async function bootstrap() {
  // Wait for schema creation/migration (instant for SQLite, async for Postgres).
  await db.ready;
  // Seed accounts are development-only; change them before any production deployment.
@@ -518,6 +523,11 @@ async function start() {
   console.log('Seeded default users: admin / admin123, bcba / admin123 — CHANGE BEFORE PRODUCTION.');
  }
  for(const name of ['admin','bcba']){const seed=await db.prepare('SELECT * FROM users WHERE username=?').get(name);if(seed&&!seed.must_change_password&&verifyPassword('admin123',seed.password_hash))await db.prepare('UPDATE users SET must_change_password=1 WHERE id=?').run(seed.id);}
- app.listen(port,'0.0.0.0',()=>console.log(`ClearPathFBA API listening on ${port}`));
 }
-start().catch((err) => { console.error('Startup failed:', err); process.exit(1); });
+// When run directly (local dev / a Node host), listen. Under a serverless
+// platform (VERCEL set) the platform invokes the exported app via vercel-entry.
+if (!process.env.VERCEL) {
+ bootstrap().then(() => {
+  app.listen(port,'0.0.0.0',()=>console.log(`ClearPathFBA API listening on ${port}`));
+ }).catch((err) => { console.error('Startup failed:', err); process.exit(1); });
+}

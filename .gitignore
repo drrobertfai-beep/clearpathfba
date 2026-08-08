@@ -40,3 +40,6 @@ screenshots/
 *.jpeg
 # Keep application icons that are part of the PWA source.
 !client/public/*.png
+
+# Vercel Build Output API artifacts
+.vercel/
