@@ -12,7 +12,8 @@
  *  - Versioned cache name + skipWaiting + clientsClaim: on redeploy the new SW
  *    takes over immediately and swaps the cache.
  */
-const CACHE = 'clearpath-shell-v2';
+const CACHE = 'clearpath-shell-v3';
+const SYNC_TAG = 'clearpath-sync';
 const PRECACHE = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -28,6 +29,21 @@ self.addEventListener('activate', (e) => {
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
+  );
+});
+// Background Sync: the offline data-point queue lives in the page context
+// (IndexedDB), so on a sync event for our tag we ask any open client page to
+// flush. If no page is open the registration just resolves; the queue is
+// still flushed by the window 'online' handler or the next manual sync the
+// moment the app is next opened. A sync that fires while the page is offline
+// or while a flush is already running is a no-op in the page's handler.
+self.addEventListener('sync', (e) => {
+  if (e.tag !== SYNC_TAG) return;
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clients) => {
+        clients.forEach((c) => c.postMessage({ type: SYNC_TAG }));
+      })
   );
 });
 
