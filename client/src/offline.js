@@ -236,8 +236,36 @@ async function migrateLegacy() {
 export function getQueue() {
   return memoryQueue.map(operationToView);
 }
+export function getQueueCounts(ops) {
+  return {
+    pending: ops.filter((o) => o.status !== 'conflicted').length,
+    conflicted: ops.filter((o) => o.status === 'conflicted').length,
+  };
+}
 export function getState() {
-  return { online: typeof navigator !== 'undefined' ? navigator.onLine : true, pending: memoryQueue.length };
+  const counts = getQueueCounts(memoryQueue);
+  return { online: typeof navigator !== 'undefined' ? navigator.onLine : true, ...counts };
+}
+export function getConflicts() { return memoryQueue.filter((o) => o.status === 'conflicted').map(operationToView); }
+
+export function buildEditOperation({ kind, endpoint, body, record, queued_at }) {
+  const now = queued_at || new Date().toISOString();
+  return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2), kind, method: 'PUT', endpoint, body: { ...body, base_updated_at: record?.updated_at }, record_id: record?.id, queued_at: now, created_at: now, attempts: 0, last_error: null, status: 'pending', server_record: null };
+}
+export function enqueueEdit(payload) {
+  const op = buildEditOperation(payload); memoryQueue = sortOps([...memoryQueue, op]); emit(); putOp(op).catch(() => {}); requestBackgroundSync(); return operationToView(op);
+}
+export async function resolveConflict(id, choice) {
+  const op = memoryQueue.find((x) => x.id === id);
+  if (!op || op.status !== 'conflicted') return { ok: false, error: 'Conflict no longer exists.' };
+  if (choice === 'server') { removeQueued(id); return { ok: true, record: op.server_record }; }
+  const token = localStorage.getItem('clearpath_token');
+  const body = { ...op.body, base_updated_at: op.server_record?.updated_at };
+  try {
+    const r = await fetch(op.endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw Object.assign(new Error(e.error || 'Could not apply your edit.'), { status: r.status }); }
+    const record = await r.json(); removeQueued(id); return { ok: true, record };
+  } catch (e) { return { ok: false, error: e.message, status: e.status }; }
 }
 function emit() {
   const s = getState();
@@ -289,10 +317,11 @@ export function removeQueued(uuid) {
   }
 }
 
-function recordFailure(op, message) {
-  const updated = { ...op, attempts: (op.attempts || 0) + 1, last_error: message };
+function recordFailure(op, message, extra = {}) {
+  const updated = { ...op, attempts: (op.attempts || 0) + 1, last_error: message, ...extra };
   const idx = memoryQueue.findIndex((o) => o.id === op.id);
   if (idx !== -1) memoryQueue[idx] = updated;
+  emit();
   putOp(updated).catch(() => {});
 }
 
@@ -310,6 +339,7 @@ export async function flushQueue() {
     if (!token) return { synced: 0, failed: memoryQueue.length, stopped: 'auth' };
     let synced = 0, failed = 0, stopped = null;
     for (const op of [...memoryQueue]) {
+      if (op.status === 'conflicted') continue;
       try {
         const r = await fetch(op.endpoint, {
           method: op.method || 'POST',
@@ -317,6 +347,11 @@ export async function flushQueue() {
           body: JSON.stringify(op.body),
         });
         if (r.ok) { removeQueued(op.id); synced++; }
+        else if (r.status === 409) {
+          const data = await r.json().catch(() => ({}));
+          recordFailure(op, data.error || 'Conflict detected', { status: 'conflicted', server_record: data, conflict: true });
+          failed++;
+        }
         else if (r.status === 401 || r.status === 403) { stopped = 'auth'; break; }
         else { recordFailure(op, `HTTP ${r.status}`); failed++; }
       } catch (err) {
