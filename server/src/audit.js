@@ -52,6 +52,12 @@ export function signOffsFor(assessmentId, documentType) {
    status: s.status,
    status_label: SIGN_OFF_STATUS_LABELS[s.status] || s.status,
    signature: s.signature,
+   signature_typed: s.signature_typed,
    signed_at: s.signed_at,
+   // Cryptographic e-signature metadata (set once signed). The digest is a
+   // SHA-256 hash of the signed document — safe to expose to document viewers.
+   signature_algo: s.signature_algo,
+   signature_digest: s.signature_digest,
+   signature_key_fingerprint: s.signature_key_fingerprint,
   }));
 }

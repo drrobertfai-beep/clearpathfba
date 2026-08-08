@@ -47,6 +47,7 @@ export function deidentify(payload) {
    ...s,
    signatory_name: null,
    signature: null,
+   signature_typed: null,
    signed_at: null,
    status: 'pending',
    status_label: 'Pending',

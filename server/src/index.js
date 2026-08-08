@@ -13,6 +13,7 @@ import { pdfForReport, pdfForBip, pdfForCrisis, pdfForDataSheet, pdfForProgressR
 import { assessmentExport, csvExport, importCsv } from './portability.js';
 import { logAudit, DOCUMENT_TYPE_LABELS, SIGNATORY_ROLE_LABELS, SIGN_OFF_STATUS_LABELS } from './audit.js';
 import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth, requireRole, ROLES, publicUser } from './auth.js';
+import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
 const app = express();
 const port = process.env.API_PORT || 4000;
 // Seed credentials are development-only; change them before any production deployment.
@@ -35,6 +36,10 @@ const changedFields = (oldRow, newRow, fields) => fields.filter((f) => JSON.stri
 const setFields = (row, fields) => fields.filter((f) => row?.[f] != null && row[f] !== '');
 const DOCUMENT_TYPES = ['fba_report', 'bip', 'crisis_plan'];
 const SIGNATORY_ROLES = ['bcba', 'guardian', 'supervisor', 'other'];
+// The document payload builders used by the JSON/Word/PDF export routes. The
+// e-signature digests the SAME payload these builders produce, so a signature
+// covers exactly what is exported for that document type.
+const DOC_BUILDERS = { fba_report: buildReport, bip: buildBip, crisis_plan: buildCrisisPlan };
 function validateSignOff(body) {
  const dt = body.document_type, role = body.signatory_role, name = clean(body.signatory_name);
  if (!dt || !DOCUMENT_TYPES.includes(dt)) return `Invalid document_type. Must be one of: ${DOCUMENT_TYPES.join(', ')}.`;
@@ -91,7 +96,10 @@ app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','X-Frame-Op
 app.use(cors()); app.use(express.json({limit:'1mb'})); app.use(express.text({type:'text/csv',limit:'5mb'}));
 // MVP authentication: bearer sessions backed by SHA-256 token hashes. Permission map is in auth.js.
 app.post('/api/auth/login',authRateLimit,(req,res)=>{const username=clean(req.body?.username);const password=req.body?.password;if(!username||username.length>100||typeof password!=='string'||!password)return res.status(400).json({error:'Username and password are required.'});let u=db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(username);let sec=db.prepare('SELECT * FROM login_security WHERE username=?').get(username);if(sec?.locked_until&&new Date(sec.locked_until+'Z')>new Date()){return res.status(423).json({error:'Account locked, try again later.'});}if(sec?.locked_until){db.prepare('UPDATE login_security SET failed_count=0,locked_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE username=?').run(username);logAudit(db,{assessment_id:null,actor:username,action:'login_unlock',details:{label:`Account unlocked: ${username}`,username,ip:req.ip}});sec=null;}if(!u||!verifyPassword(password,u.password_hash)){const count=(sec?.failed_count||0)+1;const locked=count>=5;db.prepare("INSERT INTO login_security(username,failed_count,locked_until) VALUES(?,?,CASE WHEN ? THEN datetime('now','+15 minutes') ELSE NULL END) ON CONFLICT(username) DO UPDATE SET failed_count=excluded.failed_count,locked_until=excluded.locked_until,updated_at=CURRENT_TIMESTAMP").run(username,count,locked?1:0);logAudit(db,{assessment_id:null,actor:username,action:locked?'login_lockout':'login_failed',details:{label:locked?`Account locked: ${username}`:`Failed login: ${username}`,username,ip:req.ip}});return res.status(locked?423:401).json({error:locked?'Account locked, try again later.':'Invalid username or password.'});}db.prepare('UPDATE login_security SET failed_count=0,locked_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE username=?').run(username);clearLoginAttempts(req.ip);res.json({token:issueSession(u.id),user:publicUser(u),must_change_password:!!u.must_change_password});});
-app.use((req,res,next)=>req.path==='/api/health'||req.path==='/api/auth/login'?next():requireAuth(req,res,next));
+// The unauthenticated sign-off verification endpoint is deliberately public
+// (minimal, PHI-free payload) so a document recipient can check a signature
+// without an account. Everything else stays authenticated.
+app.use((req,res,next)=>req.path==='/api/health'||req.path==='/api/auth/login'||req.path.startsWith('/api/verify/sign-off/')?next():requireAuth(req,res,next));
 // Least-privilege route gates: reads/documents are authenticated; mutations are role constrained.
 app.use((req,res,next)=>{const p=req.path,m=req.method,r=req.user?.role;let allowed=null;
  if(m==='DELETE'&&(/^\/api\/(clients|assessments|target-behaviors)\//.test(p)))allowed=['admin','bcba'];
@@ -328,13 +336,18 @@ app.get('/api/assessments/:id/data-sheet', (req, res) => {
  } });
  res.json(deidentified ? deidentify(doc) : doc);
 });
-// --- Sign-offs (in-app signature RECORD; formal e-signature is a later phase) ---
+// --- Sign-offs (typed-name record + formal Ed25519 e-signature) ---
 // Decision notes (kept in one place so the semantics are stable):
 //  * Duplicate (assessment, document_type, signatory_role) POST -> 409 Conflict.
 //    No upsert: each role signs each document once, and the audit trail keeps
 //    exactly one "created" event per row. The UI pre-disables already-added roles.
 //  * POST /sign -> 400 when already signed (no silent re-sign). A signed record
 //    is revoked first via DELETE, keeping the trail explicit.
+//  * Signing computes a SHA-256 digest over the canonical JSON of the SAME
+//    document payload the export builders produce (buildReport/buildBip/
+//    buildCrisisPlan), signs the digest bytes with the org Ed25519 key, and
+//    stores signature + digest + key fingerprint on the row. Verification
+//    re-checks both the cryptography and the current document content.
 //  * DELETE revoke -> hard-deletes the row; the audit entry preserves the
 //    signatory + status (was_signed) at the time of removal.
 //  * Data sheets carry no signatures, so sign_offs only covers the three
@@ -379,16 +392,69 @@ app.post('/api/sign-offs/:id/sign', (req, res) => {
  const sig = clean(req.body.signature);
  if (!sig) return res.status(400).json({ error: 'signature is required — type the signatory name as the in-app signature.' });
  if (sig.length > 500) return res.status(400).json({ error: 'signature must be 500 characters or fewer.' });
+ // Formal e-signature: digest + sign the exact payload the export builders
+ // produce for this assessment/document_type, so the signature covers what is
+ // actually exported (report/bip/crisis-plan).
+ const build = DOC_BUILDERS[row.document_type];
+ const payload = build ? build(row.assessment_id) : null;
+ if (!payload) return res.status(404).json({ error: 'Assessment not found.' });
+ const { digest, signature: sigB64, fingerprint } = signDocument(payload, row.document_type);
  const signedAt = new Date().toISOString();
- db.prepare("UPDATE sign_offs SET status = 'signed', signature = ?, signed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(sig, signedAt, req.params.id);
+ // `signature` stores the base64 Ed25519 signature bytes (verifiable later);
+ // `signature_typed` keeps the human-readable typed-name signature.
+ db.prepare("UPDATE sign_offs SET status = 'signed', signature = ?, signature_algo = ?, signature_digest = ?, signature_key_fingerprint = ?, signature_typed = ?, signed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+  .run(sigB64, SIGNATURE_ALGO, digest, fingerprint, sig, signedAt, req.params.id);
  const updated = signOffOut(signOffById.get(req.params.id));
  logAudit(db, { assessment_id: updated.assessment_id, actor: auditActor(req), action: 'sign_off_signed', details: {
-  label: `Signed ${updated.document_type_label} as ${updated.signatory_role_label} (${updated.signatory_name})`,
+  label: `Signed ${updated.document_type_label} as ${updated.signatory_role_label} (${updated.signatory_name}) — Ed25519 ${String(updated.signature_key_fingerprint).slice(0, 8)}…`,
   sign_off_id: updated.id, document_type: updated.document_type, document_type_label: updated.document_type_label,
   signatory_role: updated.signatory_role, signatory_role_label: updated.signatory_role_label,
-  signatory_name: updated.signatory_name, signature: updated.signature, signed_at: updated.signed_at,
+  signatory_name: updated.signatory_name, signature_typed: updated.signature_typed, signed_at: updated.signed_at,
+  // Cryptographic details so the audit trail can re-verify the signature.
+  signature_algo: updated.signature_algo, signature_digest: updated.signature_digest,
+  signature_key_fingerprint: updated.signature_key_fingerprint,
  } });
  res.json(updated);
+});
+// Shared verification: cryptographic check against the stored digest AND a
+// content check (the digest of the CURRENT document payload must equal the
+// stored digest — so editing the assessment after signing flips valid=false,
+// tampered=true).
+function verifySignOffRow(row) {
+ if (!row || row.status !== 'signed' || !row.signature_digest) return { error: 'This sign-off has not been digitally signed.' };
+ const build = DOC_BUILDERS[row.document_type];
+ const payload = build ? build(row.assessment_id) : null;
+ if (!payload) return { error: 'Assessment not found.' };
+ const v = verifyDocument(payload, row.document_type, {
+  digest: row.signature_digest, signature: row.signature, fingerprint: row.signature_key_fingerprint,
+ });
+ return { result: {
+  valid: v.valid, tampered: v.tampered,
+  signed_at: row.signed_at, signatory_name: row.signatory_name,
+  document_type: row.document_type, document_type_label: DOCUMENT_TYPE_LABELS[row.document_type] || row.document_type,
+  algorithm: row.signature_algo || SIGNATURE_ALGO, key_fingerprint: row.signature_key_fingerprint,
+ } };
+}
+app.get('/api/sign-offs/:id/verify', (req, res) => {
+ const row = signOffById.get(req.params.id);
+ if (!row) return res.status(404).json({ error: 'Sign-off not found.' });
+ const out = verifySignOffRow(row);
+ if (out.error) return res.status(400).json({ error: out.error });
+ res.json(out.result);
+});
+// Unauthenticated verification for document recipients: returns ONLY the
+// minimal verification payload — no client or assessment PHI whatsoever.
+app.get('/api/verify/sign-off/:id', (req, res) => {
+ const row = signOffById.get(req.params.id);
+ if (!row) return res.status(404).json({ error: 'Sign-off not found.' });
+ const out = verifySignOffRow(row);
+ if (out.error) return res.status(400).json({ error: out.error });
+ res.json({
+  valid: out.result.valid, tampered: out.result.tampered,
+  signed_at: out.result.signed_at, document_type: out.result.document_type,
+  algorithm: out.result.algorithm, key_fingerprint: out.result.key_fingerprint,
+  signatory_name: out.result.signatory_name,
+ });
 });
 app.delete('/api/sign-offs/:id', (req, res) => {
  const row = signOffById.get(req.params.id);
