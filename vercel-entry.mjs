@@ -13,38 +13,37 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, bootstrap } from './server/src/index.js';
+import { createBootWithRetry } from './server/src/boot-retry.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+// Cold-start resilience: a suspended Neon compute RSTs the first connects and
+// takes seconds to wake, so retry with a delay between attempts (8 x ~3.5s
+// fits comfortably inside the function's maxDuration while giving Neon's wake
+// several chances). Each attempt itself fails fast thanks to the pool's
+// connection/query timeouts.
+const BOOT_RETRIES = 8;
+const BOOT_RETRY_DELAY_MS = 3500;
+const bootWithRetry = createBootWithRetry({
+ retries: BOOT_RETRIES,
+ delayMs: BOOT_RETRY_DELAY_MS,
+ bootstrapFn: bootstrap,
+ onFail: (attempt, total, err) => {
+  console.error(`ClearPathFBA bootstrap attempt ${attempt}/${total} failed:`, err);
+ },
+});
 let bootPromise = null;
-const BOOT_RETRIES = 5;
-const BOOT_RETRY_DELAY_MS = 2000;
-async function bootWithRetry() {
-  let lastErr;
-  for (let attempt = 0; attempt < BOOT_RETRIES; attempt += 1) {
-    try {
-      return await bootstrap();
-    } catch (err) {
-      lastErr = err;
-      console.error(`ClearPathFBA bootstrap attempt ${attempt + 1}/${BOOT_RETRIES} failed:`, err);
-      if (attempt + 1 < BOOT_RETRIES) {
-        await new Promise((r) => setTimeout(r, BOOT_RETRY_DELAY_MS));
-      }
-    }
-  }
-  throw lastErr;
-}
 function boot() {
-  if (!bootPromise) {
-    bootPromise = bootWithRetry().catch((err) => {
-      // Do not memoize failures: a transient DB blip on cold start must not
-      // brick the instance for its whole lifetime (every later request would
-      // re-serve the same rejection). Reset so the next request retries.
-      bootPromise = null;
-      throw err;
-    });
-  }
-  return bootPromise;
+ if (!bootPromise) {
+  bootPromise = bootWithRetry().catch((err) => {
+   // Do not memoize failures: a transient DB blip on cold start must not
+   // brick the instance for its whole lifetime (every later request would
+   // re-serve the same rejection). Reset so the next request retries.
+   bootPromise = null;
+   throw err;
+  });
+ }
+ return bootPromise;
 }
 // Kick off schema/seed on cold start so the first warm request is instant.
 boot().catch(() => {});

@@ -61,7 +61,7 @@ PY
 cp -R server/node_modules/pdfkit/js/data .vercel/output/functions/render.func/data
 
 cat > .vercel/output/functions/render.func/.vc-config.json <<'JSON'
-{ "runtime": "nodejs22.x", "handler": "index.mjs", "launcherType": "Nodejs", "maxDuration": 30, "supportsResponseStreaming": true }
+{ "runtime": "nodejs22.x", "handler": "index.mjs", "launcherType": "Nodejs", "maxDuration": 60, "supportsResponseStreaming": true }
 JSON
 cat > .vercel/output/config.json <<'JSON'
 { "version": 3, "routes": [ { "handle": "filesystem" }, { "src": "/(.*)", "dest": "/render" } ] }

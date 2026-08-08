@@ -14,6 +14,22 @@ Open http://localhost:5173. The API runs on http://localhost:4000 and Vite proxi
 
 For production-style checks: `npm run start --prefix server` and `npm run build --prefix client`.
 
+## Deployment
+Deploy production with `./app-deploy.sh` (builds the Vercel bundle, deploys it
+to the `clearpathfba-app` project, and verifies the deployment: same bundle
+asset served by the deployment URL and `app.clearpathfba.com`, plus a healthy
+`/api/health` with an Express `x-powered-by` header).
+
+Notes:
+- `app.clearpathfba.com` is a **project-attached domain** on the
+  `clearpathfba-app` project — production deploys attach to it automatically.
+  Do NOT run `vercel alias set` (it would conflict with the attached domain).
+- The GitHub integration is **unlinked** from the project (its auto-deploys
+  used the wrong build command), so deploys are exclusively manual via
+  `./app-deploy.sh`.
+- `DATABASE_URL` comes from the environment or `/home/agent-lead/.neon-db-url`;
+  `VERCEL_TOKEN` from the environment or `/home/agent-lead/.vercel-token`.
+
 ## Layout
 - `client/`: Vite React UI
 - `server/`: Express REST API, database initialization/migrations, SQLite persistence
