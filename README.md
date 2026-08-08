@@ -39,6 +39,28 @@ Notes:
 
 The schema includes the next-phase assessment, target behavior, and ABC/data-point tables. Authentication, authorization, audit history, formal report export, BIP/crisis plans, and PostgreSQL deployment remain future phases.
 
+## Export / import
+Data portability endpoints (all authenticated, all support `?deidentified=true`
+for the PHI-stripped variant, and all are logged to the audit trail):
+
+- `GET /api/assessments/:id/export.csv` — ABC/baseline data points as CSV.
+- `GET /api/assessments/:id/export.json` — full assessment payload as JSON.
+- `POST /api/assessments/:id/import/csv` — transactional CSV import of data
+  points (admin/bcba/specialist).
+- `GET /api/clients/:id/export.fhir` — HL7 FHIR R4 Bundle
+  (`application/fhir+json`) with one `Patient` resource for the client.
+- `GET /api/assessments/:id/export.fhir` — HL7 FHIR R4 Bundle with the client
+  `Patient` first, then one `Observation` per data point (code = target
+  behavior, subject = Patient, `effectiveDateTime` = recorded_at,
+  `valueQuantity` keyed off measurement type, ABC context as components), plus
+  a `QuestionnaireResponse` summarizing the assessment and target behaviors.
+
+The FHIR mapping lives in `server/src/fhir.js` (pure functions — no db calls),
+so it is unit-tested directly in `server/tests/fhir.test.mjs`. De-identified
+FHIR bundles keep the clinical content but drop the client name (replaced with
+"Client #&lt;id&gt;"), date of birth, gender, assessor, and notes, and carry a
+`DEID` tag in `Bundle.meta`. No FHIR *import* exists yet — export only.
+
 ## Security
 Security and audit policies, plus a code-grounded encryption-at-rest review, are in [`docs/`](docs/):
 - [Security Policy](docs/security-policy.md)
