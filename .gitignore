@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output and runtime artifacts
+dist/
+.run/
+*.log
+
+# Local application data (development SQLite database and sidecars)
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Environment files and local credentials
+.env
+.env.*
+!.env.example
+*token*
+*secret*
+
+# Temporary files, editor/OS metadata, and test artifacts
+tmp/
+temp/
+.tmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+.DS_Store
+coverage/
+.nyc_output/
+
+# Local screenshots and exports
+screenshots/
+*.png
+*.jpg
+*.jpeg
+# Keep application icons that are part of the PWA source.
+!client/public/*.png
