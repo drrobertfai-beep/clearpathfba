@@ -30,10 +30,12 @@
 // and normalizes unique-violation errors to include 'UNIQUE' (SQLite wording)
 // so existing catch handlers keep working.
 
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-
+// better-sqlite3 is a native module; load it lazily (only in SQLite mode) so
+// serverless/Postgres installs that cannot build it still boot cleanly.
+const require = createRequire(import.meta.url);
 const PG_URL = process.env.DATABASE_URL;
 
 // ---------------------------------------------------------------------------
@@ -282,6 +284,7 @@ CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
 // SQLite mode (default; synchronous, unchanged behavior).
 // ---------------------------------------------------------------------------
 function sqliteDb() {
+ const Database = require('better-sqlite3');
  const file = process.env.DATABASE_PATH || path.resolve('data/clearpathfba.sqlite');
  fs.mkdirSync(path.dirname(file), { recursive: true });
  const raw = new Database(file);
