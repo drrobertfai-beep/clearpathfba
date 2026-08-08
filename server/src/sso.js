@@ -3,16 +3,37 @@ import db from './db.js';
 import { issueSession } from './auth.js';
 import { logAudit } from './audit.js';
 
+// OAuth state is self-contained so login and callback can land on different
+// serverless instances. The local cache is only a best-effort single-use guard.
 const states = new Map();
+const consumed = new Map();
+const fallbackStateSecret = crypto.randomBytes(32);
 let discoveryCache = null;
 const ttl = 60 * 60 * 1000;
+const stateSecret = () => process.env.OIDC_CLIENT_SECRET || fallbackStateSecret;
 export const ssoEnabled = () => Boolean(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET);
 const issuer = () => String(process.env.OIDC_ISSUER || '').replace(/\/$/, '');
 const publicBase = req => `${req.protocol}://${req.get('host')}`;
 export const redirectUri = req => process.env.OIDC_REDIRECT_URI || `${publicBase(req)}/api/auth/sso/callback`;
 const disabled = res => res.status(503).json({ error: 'SSO is not configured.' });
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 24);
-const prune = () => { const now = Date.now(); for (const [k,v] of states) if (v.expires < now) states.delete(k); };
+const signState = value => crypto.createHmac('sha256', stateSecret()).update(value).digest('base64url');
+const encodeState = payload => {
+ const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+ return `${body}.${signState(body)}`;
+};
+const decodeState = state => {
+ const [body, signature] = String(state || '').split('.');
+ if (!body || !signature) return null;
+ const expected = Buffer.from(signState(body));
+ const actual = Buffer.from(signature);
+ if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
+ try {
+  const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  return payload && payload.exp > Date.now() ? payload : null;
+ } catch { return null; }
+};
+const prune = () => { const now = Date.now(); for (const [k,v] of states) if (v.expires < now) states.delete(k); for (const [k,expires] of consumed) if (expires < now) consumed.delete(k); };
 
 export async function discover() {
  if (!ssoEnabled()) throw new Error('SSO is not configured.');
@@ -23,9 +44,24 @@ export async function discover() {
  if (!d.authorization_endpoint || !d.token_endpoint || !d.jwks_uri || d.issuer !== issuer()) throw new Error('Invalid OIDC discovery document.');
  discoveryCache = { value: d, expires: Date.now() + ttl }; return d;
 }
-export function resetSsoState() { states.clear(); discoveryCache = null; }
-export const createState = (redirect, lifetimeMs = 10 * 60 * 1000) => { prune(); const state=crypto.randomBytes(32).toString('hex'), nonce=crypto.randomBytes(32).toString('hex'); states.set(state,{state,nonce,redirect,expires:Date.now()+lifetimeMs}); return {state,nonce}; };
-export const consumeState = state => { prune(); const v=states.get(state); if (v) states.delete(state); return v && v.expires>Date.now() ? v : null; };
+export function resetSsoState() { states.clear(); consumed.clear(); discoveryCache = null; }
+export const createState = (redirect, lifetimeMs = 10 * 60 * 1000) => {
+ prune();
+ const nonce = crypto.randomBytes(32).toString('hex');
+ const expires = Date.now() + lifetimeMs;
+ const state = encodeState({ nonce, redirect, exp: expires });
+ states.set(state, { state, nonce, redirect, expires });
+ return { state, nonce };
+};
+export const consumeState = state => {
+ prune();
+ const local = states.get(state);
+ if (local) states.delete(state);
+ const payload = decodeState(state);
+ if (!payload || consumed.has(state)) return null;
+ consumed.set(state, payload.exp);
+ return { state, nonce: payload.nonce, redirect: payload.redirect, expires: payload.exp };
+};
 
 const b64 = s => Buffer.from(s.replace(/-/g,'+').replace(/_/g,'/'), 'base64');
 const derInt = b => { let x=Buffer.from(b); while(x.length>1&&x[0]===0)x=x.subarray(1); if(x[0]&128)x=Buffer.concat([Buffer.from([0]),x]); return Buffer.concat([Buffer.from([2,x.length]),x]); };

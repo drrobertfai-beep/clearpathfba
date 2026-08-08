@@ -26,7 +26,7 @@
 // adapter rewrites `?` placeholders to `$n`, maps rows back to the shapes the
 // app already expects (COUNT(*) → Number, timestamps → 'YYYY-MM-DD HH:MM:SS'
 // UTC strings like SQLite's CURRENT_TIMESTAMP, JSONB → JSON text, booleans →
-// 1/0), appends RETURNING id to plain INSERTs so run().lastInsertRowid works,
+// 1/0), appends RETURNING * to plain INSERTs so run().lastInsertRowid works,
 // and normalizes unique-violation errors to include 'UNIQUE' (SQLite wording)
 // so existing catch handlers keep working.
 
@@ -437,9 +437,12 @@ function postgresDb() {
       const r = await pool.query({ text, values: params });
       return mapRows(r.fields, r.rows);
      }
-     // run: plain INSERTs get RETURNING id so lastInsertRowid matches SQLite.
-     const r = await pool.query({ text: isInsert ? `${text} RETURNING id` : text, values: params });
-     return { changes: r.rowCount, lastInsertRowid: r.rows && r.rows.length ? mapRows(r.fields, r.rows)[0].id : undefined };
+     // run: plain INSERTs return the inserted row so tables without an id
+     // column (for example login_security) work too. SQLite's callers use
+     // lastInsertRowid only for tables that actually have an id.
+     const r = await pool.query({ text: isInsert ? `${text} RETURNING *` : text, values: params });
+     const returned = r.rows && r.rows.length ? mapRows(r.fields, [r.rows[0]])[0] : undefined;
+     return { changes: r.rowCount, lastInsertRowid: returned?.id };
     } catch (err) { throw pgError(err); }
    };
    return {
