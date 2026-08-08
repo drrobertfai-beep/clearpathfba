@@ -113,6 +113,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS login_security (
  username TEXT PRIMARY KEY, failed_count INTEGER NOT NULL DEFAULT 0, locked_until TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id), code_hash TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
     `);
 // Defensive migration: a DB file may already exist with an older schema.
 // Add any missing columns via ALTER TABLE (SQLite cannot add CHECKs this way,
@@ -124,6 +128,8 @@ const migrations = {
  ],
  users: [
   ['must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
+  ['mfa_secret', 'TEXT'],
+  ['mfa_enabled', 'INTEGER NOT NULL DEFAULT 0'],
  ],
  target_behaviors: [
   ['safety_classification', "TEXT NOT NULL DEFAULT 'none'"],
