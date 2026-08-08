@@ -28,16 +28,27 @@ test('SSO is disabled without OIDC configuration', () => {
   }
 });
 
-test('state is single-use and expired or unknown states are rejected', () => {
-  resetSsoState();
-  const made = createState('/callback');
-  const consumed = consumeState(made.state);
-  assert.equal(consumed.state, made.state);
-  assert.equal(consumed.nonce, made.nonce);
-  assert.equal(consumed.redirect, '/callback');
-  assert.ok(consumed.expires > Date.now());
-  assert.equal(consumeState(made.state), null);
-  assert.equal(consumeState('unknown'), null);
+test('signed state round-trips and is single-use', () => {
+ resetSsoState();
+ const made = createState('/callback');
+ const consumed = consumeState(made.state);
+ assert.equal(consumed.state, made.state);
+ assert.equal(consumed.nonce, made.nonce);
+ assert.equal(consumed.redirect, '/callback');
+ assert.ok(consumed.expires > Date.now());
+ assert.equal(consumeState(made.state), null);
+ assert.equal(consumeState('unknown'), null);
+});
+
+test('tampered and expired signed states are rejected', () => {
+ resetSsoState();
+ const made = createState('/callback');
+ const [body, signature] = made.state.split('.');
+ const tamperedBody = `${body.slice(0, -1)}${body.endsWith('a') ? 'b' : 'a'}`;
+ assert.equal(consumeState(`${tamperedBody}.${signature}`), null);
+ assert.equal(consumeState(`${body}.${signature.slice(0, -1)}x`), null);
+ const expired = createState('/expired', -1);
+ assert.equal(consumeState(expired.state), null);
 });
 
 test('RS256 ID tokens verify and claim or signature tampering fails', () => {
