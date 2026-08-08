@@ -152,6 +152,16 @@
 .blank-cell{height:30px}
 .sig-role{font-size:12px;font-weight:800;color:#18313b;margin-bottom:6px}
 .sig-line.filled{display:flex;align-items:flex-end;justify-content:center;font-family:'Segoe Script','Brush Script MT','Comic Sans MS',cursive;font-size:24px;color:#18313b;padding-bottom:6px}
+.sig-digital{display:flex;flex-direction:column;gap:3px;margin-top:8px;padding:8px 10px;background:#f1f8f6;border:1px solid #dce8e5;border-radius:7px}
+.sig-digital-title{font-size:11.5px;font-weight:800;color:#18745d}
+.sig-digital-fp{font-size:11px;color:#58716e;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.verify-wrap{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}
+.verify-wrap.compact{margin-top:0}
+.verify-btn{background:#fff;border:1px solid #bcd8d0;color:#18745d}
+.verify-btn:hover{background:#eaf5f1}
+.verify-badge{font-size:11.5px;font-weight:800;padding:3px 9px;border-radius:14px}
+.verify-badge.ok{background:#dff3e9;color:#18745d;border:1px solid #bfe6d8}
+.verify-badge.bad{background:#fff0ef;color:#a34339;border:1px solid #efc6c1}
 /* ---------- Sign-off panel & audit trail ---------- */
 .signoff-panel{background:#f1f8f6;border:1px solid #dce8e5;border-radius:9px;padding:18px 20px;margin:0 0 24px}
 .signoff-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}

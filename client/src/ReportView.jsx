@@ -102,11 +102,37 @@ function StatCell({ label, value }) {
 
 // --- Paper-ready signature lines. When a matching sign_offs row is signed, the
 // line is filled with the in-app signature (typed name) + date; pending rows
-// stay blank for wet ink. E-signature (cryptographic) is a later phase.
+// stay blank for wet ink. Signed rows additionally carry a formal Ed25519
+// digital signature block (algorithm + key fingerprint + verify button).
 const DEFAULT_SIG_LINES = [
  { role: 'BCBA / Behavior Analyst', fields: ['Signature', 'Printed name & credentials', 'Date'] },
  { role: 'Parent / Guardian', fields: ['Signature', 'Printed name', 'Date'] },
 ];
+const shortFp = (fp) => (fp ? String(fp).slice(0, 8) : '');
+// Authenticated verification: calls /api/sign-offs/:id/verify and renders a
+// Valid / "Invalid — document modified since signing" badge.
+function VerifySignature({ signOffId, compact }) {
+ const [state, setState] = useState('idle'); // idle | checking | ok | invalid | error
+ const [msg, setMsg] = useState('');
+ const run = async () => {
+  setState('checking'); setMsg('');
+  try {
+   const r = await api(`/api/sign-offs/${signOffId}/verify`);
+   if (r && r.valid) { setState('ok'); }
+   else { setState('invalid'); setMsg(r && r.tampered ? 'document modified since signing' : 'signature does not verify'); }
+  } catch (x) { setState('error'); setMsg(x.message); }
+ };
+ return (
+  <span className={'verify-wrap' + (compact ? ' compact' : '')}>
+   <button type="button" className="small verify-btn no-print" onClick={run} disabled={state === 'checking'}>
+    {state === 'checking' ? 'Verifying…' : 'Verify signature'}
+   </button>
+   {state === 'ok' ? <span className="verify-badge ok no-print">✓ Signature valid</span> : null}
+   {state === 'invalid' ? <span className="verify-badge bad no-print">✗ Invalid — {msg}</span> : null}
+   {state === 'error' ? <span className="verify-badge bad no-print">{msg}</span> : null}
+  </span>
+ );
+}
 function SignatureLines({ lines, signOffs }) {
  // Start from the document's standard lines (keyed by role_code), then overlay
  // any recorded sign-off rows — signed rows fill the line, pending rows keep a
@@ -123,15 +149,22 @@ function SignatureLines({ lines, signOffs }) {
  return (
   <div className="report-section signatures">
    <h2>Signatures</h2>
-   <p className="sig-note">Signatures recorded in ClearPathFBA as an in-app sign-off record (typed name + date + role). Formal, legally-binding e-signature integration is pending — treat these as workflow sign-offs.</p>
+   <p className="sig-note">Signatures recorded in ClearPathFBA as a sign-off record (typed name + date + role). Signed sign-offs carry a formal Ed25519 cryptographic signature over the document content and can be verified with the Verify signature button.</p>
    <div className="sig-grid">
     {rows.map((r, i) => (
      <div className="sig-block" key={r.id != null ? r.id : i}>
       <div className="sig-role">{r.role}</div>
       {r.status === 'signed' ? (
        <>
-        <div className="sig-line filled">{r.signature || r.signatory_name}</div>
+        <div className="sig-line filled">{r.signature_typed || r.signatory_name}</div>
         <div className="sig-meta"><span>Signed in app by {r.signatory_name}</span><span>Date: {fmtDateTime(r.signed_at)}</span></div>
+        {r.signature_algo ? (
+         <div className="sig-digital">
+          <span className="sig-digital-title">Digitally signed ({r.signature_algo})</span>
+          <span className="sig-digital-fp">Key fingerprint: {shortFp(r.signature_key_fingerprint)}…</span>
+          <VerifySignature signOffId={r.id} />
+         </div>
+        ) : null}
        </>
       ) : r.signatory_name ? (
        <>
@@ -151,8 +184,11 @@ function SignatureLines({ lines, signOffs }) {
  );
 }
 
-// --- In-app sign-off management panel (screen only, hidden when printing) ---
-// Honest labelling: this is a signature RECORD, not a cryptographic e-signature.
+// --- Sign-off management panel (screen only, hidden when printing) ---
+// Adds a signatory and collects the typed-name signature; the server records a
+// formal Ed25519 cryptographic signature over the document content at the same
+// time (visible here + on the printed signature block, verifiable via the
+// Verify signature button).
 const SIGN_OFF_DOC_TYPES = { report: 'fba_report', bip: 'bip', crisis: 'crisis_plan' };
 const ROLE_OPTIONS = [
  { value: 'bcba', label: 'BCBA' },
@@ -209,7 +245,7 @@ function SignOffPanel({ assessmentId, docType, docLabel, onChanged }) {
     <h3>Sign-offs — {docLabel}</h3>
     <span className="signoff-count">{signedCount}/{rows ? rows.length : '…'} signed</span>
    </div>
-   <p className="card-hint">In-app signature record (typed name + date + role) tracked for this document. This is a workflow sign-off record, not a legally-binding electronic signature — formal e-signature integration is pending.</p>
+   <p className="card-hint">Sign-off record (typed name + date + role) tracked for this document. Signing also records a formal Ed25519 cryptographic signature over the document content — verify it any time with the Verify signature button.</p>
    {error ? <div className="error">{error}</div> : null}
    {!rows ? <p className="muted">Loading signatories…</p> : rows.length === 0 ? <p className="empty card-hint">No signatories added yet for this document. Add one below.</p> : (
     <div className="signoff-list">
@@ -219,6 +255,8 @@ function SignOffPanel({ assessmentId, docType, docLabel, onChanged }) {
        {r.status === 'signed' ? (
         <div className="signoff-state signed">
          <span className="signed-line">✓ Signed — {r.signatory_name}, {r.signatory_role_label}, {fmtDateTime(r.signed_at)}</span>
+         {r.signature_algo ? <span className="sig-digital-fp">Digitally signed ({r.signature_algo}) — key {shortFp(r.signature_key_fingerprint)}…</span> : null}
+         <VerifySignature signOffId={r.id} compact />
          <button className="small danger" onClick={() => revoke(r)}>Revoke</button>
         </div>
        ) : signId === r.id ? (

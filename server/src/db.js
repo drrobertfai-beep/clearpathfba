@@ -45,9 +45,10 @@ CREATE TABLE IF NOT EXISTS function_hypotheses (
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(assessment_id, target_behavior_id)
 );
--- In-app signature RECORD (typed name + role + date) per document per role.
--- This is a tracking record for ClearPathFBA's own workflow, NOT a legally-binding
--- cryptographic e-signature — formal e-signature integration is a later phase.
+-- In-app signature RECORD (typed name + role + date) per document per role,
+-- upgraded with a formal Ed25519 e-signature over the document content.
+-- signature holds the base64 Ed25519 signature bytes; signature_typed keeps
+-- the human-readable typed-name signature the signatory entered.
 -- UNIQUE(assessment_id, document_type, signatory_role): each role signs each
 -- document once. The API returns 409 Conflict on a duplicate (no upsert), so the
 -- audit trail keeps exactly one create event per row.
@@ -60,9 +61,24 @@ CREATE TABLE IF NOT EXISTS sign_offs (
  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','signed')),
  signature TEXT,
  signed_at TEXT,
+ -- Cryptographic e-signature fields (Ed25519 over the document digest). Set
+ -- together when status flips to 'signed'; NULL for legacy/pending rows.
+ signature_algo TEXT,
+ signature_digest TEXT,
+ signature_key_fingerprint TEXT,
+ signature_typed TEXT,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(assessment_id, document_type, signatory_role)
+);
+-- Organization signing key (Ed25519). The private key lives ONLY on disk at
+-- data/keys/signing.pem (0600, gitignored); this table stores the public key
+-- + fingerprint so signatures can be verified against a recorded identity.
+CREATE TABLE IF NOT EXISTS signing_keys (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ fingerprint TEXT UNIQUE NOT NULL,
+ public_key_pem TEXT NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- Append-only audit trail for sign-off and generation actions. Rows are never
 -- updated or deleted; details holds a JSON object (with a human-readable label).
@@ -113,6 +129,12 @@ const migrations = {
   ['safety_classification', "TEXT NOT NULL DEFAULT 'none'"],
   ['is_safety_concern', 'INTEGER NOT NULL DEFAULT 0'],
   ['baseline_measurement_type', 'TEXT'],
+ ],
+ sign_offs: [
+  ['signature_algo', 'TEXT'],
+  ['signature_digest', 'TEXT'],
+  ['signature_key_fingerprint', 'TEXT'],
+  ['signature_typed', 'TEXT'],
  ],
 };
 for (const [table, cols] of Object.entries(migrations)) {
