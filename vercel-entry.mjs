@@ -17,10 +17,30 @@ import { app, bootstrap } from './server/src/index.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let bootPromise = null;
+const BOOT_RETRIES = 5;
+const BOOT_RETRY_DELAY_MS = 2000;
+async function bootWithRetry() {
+  let lastErr;
+  for (let attempt = 0; attempt < BOOT_RETRIES; attempt += 1) {
+    try {
+      return await bootstrap();
+    } catch (err) {
+      lastErr = err;
+      console.error(`ClearPathFBA bootstrap attempt ${attempt + 1}/${BOOT_RETRIES} failed:`, err);
+      if (attempt + 1 < BOOT_RETRIES) {
+        await new Promise((r) => setTimeout(r, BOOT_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastErr;
+}
 function boot() {
   if (!bootPromise) {
-    bootPromise = bootstrap().catch((err) => {
-      console.error('ClearPathFBA bootstrap failed:', err);
+    bootPromise = bootWithRetry().catch((err) => {
+      // Do not memoize failures: a transient DB blip on cold start must not
+      // brick the instance for its whole lifetime (every later request would
+      // re-serve the same rejection). Reset so the next request retries.
+      bootPromise = null;
       throw err;
     });
   }
