@@ -11,4 +11,4 @@ export const issueSession=(userId)=>{const raw=crypto.randomBytes(32).toString('
 export const getSessionUser=(token)=>{if(!token)return null;const h=crypto.createHash('sha256').update(token).digest('hex');const u=db.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>CURRENT_TIMESTAMP AND u.active=1").get(h);return u?publicUser(u):null;};
 export const requireAuth=(req,res,next)=>{const m=req.get('authorization')||'';const u=m.startsWith('Bearer ')?getSessionUser(m.slice(7)):null;if(!u){res.set('WWW-Authenticate','Bearer');return res.status(401).json({error:'Authentication required.'});}req.user=u;next();};
 export const requireRole=(...roles)=>(req,res,next)=>roles.includes(req.user?.role)?next():res.status(403).json({error:'Insufficient permissions.'});
-export {ROLES,publicUser};
+export {ROLES};
