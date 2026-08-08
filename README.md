@@ -22,3 +22,9 @@ For production-style checks: `npm run start --prefix server` and `npm run build 
 `GET/POST /api/clients`, `GET/PUT/DELETE /api/clients/:id`.
 
 The schema includes the next-phase assessment, target behavior, and ABC/data-point tables. Authentication, authorization, audit history, formal report export, BIP/crisis plans, and PostgreSQL deployment remain future phases.
+
+## Security
+Security and audit policies, plus a code-grounded encryption-at-rest review, are in [`docs/`](docs/):
+- [Security Policy](docs/security-policy.md)
+- [Audit Policy](docs/audit-policy.md)
+- [Encryption-at-Rest Review](docs/encryption-at-rest-review.md)
