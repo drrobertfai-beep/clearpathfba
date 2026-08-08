@@ -413,26 +413,51 @@ function postgresDb() {
  const ssl = process.env.PGSSLMODE
   ? (process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: process.env.PGSSLMODE === 'verify-full' || process.env.PGSSLMODE === 'verify-ca' })
   : (/neon\.tech/i.test(PG_URL) ? { rejectUnauthorized: false } : undefined);
- const ready = (async () => {
-  const { default: pg } = await import('pg');
-  const pool = new pg.Pool({ connectionString: PG_URL, ssl, max: 10, idleTimeoutMillis: 30000 });
-  await pool.query(PG_DDL);
-  // Guarded migrations (PG: ADD COLUMN IF NOT EXISTS is idempotent).
-  for (const [table, cols] of Object.entries(migrations)) {
-   for (const [name, def] of cols) {
-    // Timestamp columns use the native PG type/default even though the shared
-    // migration definition is SQLite-compatible (TEXT), preserving the same
-    // UTC string shape through the adapter for both backends.
-    const pgDef = name === 'updated_at' ? 'TIMESTAMPTZ NOT NULL DEFAULT now()' : def;
-    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${pgDef}`);
-    if (name === 'updated_at') await pool.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
+ // `ready` must NOT memoize failures. A suspended Neon compute (autosuspend)
+ // rejects the first connect/query (ECONNRESET); if that rejection were kept,
+ // every later `await db.ready` would re-serve it and the serverless boot-retry
+ // loop could never recover. On failure we reset so the next access builds a
+ // fresh pool (and a fresh connection attempt once Neon has woken).
+ let readyPromise = null;
+ function buildReady() {
+  const p = (async () => {
+   const { default: pg } = await import('pg');
+   // Timeouts are cold-start resilience: a sleeping Neon can hang or RST a
+   // connect; fail fast instead of pinning the serverless function so the
+   // boot retry loop can make progress. pg supports connectionTimeoutMillis,
+   // query_timeout and statement_timeout since 8.11 (we ship ^8.22).
+   const pool = new pg.Pool({
+    connectionString: PG_URL, ssl, max: 10, idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 6000, query_timeout: 20000, statement_timeout: 20000,
+   });
+   try {
+    await pool.query(PG_DDL);
+    // Guarded migrations (PG: ADD COLUMN IF NOT EXISTS is idempotent).
+    for (const [table, cols] of Object.entries(migrations)) {
+     for (const [name, def] of cols) {
+      // Timestamp columns use the native PG type/default even though the shared
+      // migration definition is SQLite-compatible (TEXT), preserving the same
+      // UTC string shape through the adapter for both backends.
+      const pgDef = name === 'updated_at' ? 'TIMESTAMPTZ NOT NULL DEFAULT now()' : def;
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${pgDef}`);
+      if (name === 'updated_at') await pool.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
+     }
+    }
+    return pool;
+   } catch (err) {
+    // The pool may hold a broken client; release it so retries don't leak
+    // sockets (fire-and-forget — we are on the error path already).
+    try { await pool.end(); } catch { /* connection-level failure */ }
+    throw err;
    }
-  }
-  return pool;
- })();
+  })();
+  p.catch(() => { if (readyPromise === p) readyPromise = null; });
+  return p;
+ }
+ const getReady = () => (readyPromise || (readyPromise = buildReady()));
  return {
   mode: 'postgres',
-  ready,
+  get ready() { return getReady(); },
   currentTimestamp: 'now()',
   nowPlus: (minutes) => `now() + interval '${minutes} minutes'`,
   orderCi: (col) => `LOWER(${col})`,
@@ -440,7 +465,7 @@ function postgresDb() {
    const isInsert = /^\s*INSERT\b/i.test(sql) && !/\bRETURNING\b/i.test(sql);
    const text = pgText(sql.replace(/;+\s*$/, ''));
    const exec = async (method, params) => {
-    const pool = await ready;
+    const pool = await getReady();
     try {
      if (method === 'get') {
       const r = await pool.query({ text, values: params });
@@ -466,7 +491,7 @@ function postgresDb() {
   },
   transaction(fn) {
    return async (...args) => {
-    const pool = await ready;
+    const pool = await getReady();
     const client = await pool.connect();
     try {
      await client.query('BEGIN');
@@ -481,7 +506,7 @@ function postgresDb() {
     }
    };
   },
-  exec(sql) { return (async () => { const pool = await ready; return pool.query(sql); })(); },
+  exec(sql) { return (async () => { const pool = await getReady(); return pool.query(sql); })(); },
  };
 }
 
