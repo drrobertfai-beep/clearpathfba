@@ -28,3 +28,12 @@ Security and audit policies, plus a code-grounded encryption-at-rest review, are
 - [Security Policy](docs/security-policy.md)
 - [Audit Policy](docs/audit-policy.md)
 - [Encryption-at-Rest Review](docs/encryption-at-rest-review.md)
+
+## Subscription billing (Stripe, test mode)
+Server-side recurring subscription billing (Solo $49 / Practice $39 /
+Organization $29 per clinician/month) with Checkout, signed webhooks, and a
+`subscriptions` table. Admin-only `/api/billing/*` routes plus
+`POST /api/stripe/webhook`. Requires `STRIPE_SECRET_KEY` and
+`STRIPE_WEBHOOK_SECRET` env vars (test keys for now). See
+[`docs/billing.md`](docs/billing.md) for the API, env vars, and the live-key
+swap procedure at pilot conversion.

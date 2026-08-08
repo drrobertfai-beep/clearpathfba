@@ -16,6 +16,7 @@ import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth
 import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
 import { generateSecret, otpauthUri, verifyTOTP, generateBackupCodes, hashBackupCode, issueMfaToken, verifyMfaToken } from './mfa.js';
 import { registerSsoRoutes } from './sso.js';
+import { PLANS, PLAN_KEYS, planByKey, stripeClient, ensurePlans, createCheckoutSession, appBaseUrl, handleWebhookEvent, statusForUser, WEBHOOK_SECRET } from './stripe.js';
 const app = express();
 const port = process.env.API_PORT || 4000;
 // Wrap async route handlers so rejected promises reach the error middleware
@@ -98,13 +99,13 @@ async function validateDataPoint(body, assessmentId) {
 }
 async function dataPointRow(id) { return await db.prepare(`SELECT dp.*, tb.name AS target_behavior_name, tb.is_safety_concern AS target_behavior_safety, tb.safety_classification AS target_behavior_safety_classification FROM data_points dp LEFT JOIN target_behaviors tb ON tb.id=dp.target_behavior_id WHERE dp.id=?`).get(id); }
 app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'"});next();});
-app.use(cors()); app.use(express.json({limit:'1mb'})); app.use(express.text({type:'text/csv',limit:'5mb'}));
+app.use(cors()); app.use(express.json({limit:'1mb',verify:(req,_res,buf)=>{req.rawBody=buf;}})); app.use(express.text({type:'text/csv',limit:'5mb'}));
 // MVP authentication: bearer sessions backed by SHA-256 token hashes. Permission map is in auth.js.
 app.post('/api/auth/login',authRateLimit,ah(async(req,res)=>{const username=clean(req.body?.username);const password=req.body?.password;if(!username||username.length>100||typeof password!=='string'||!password)return res.status(400).json({error:'Username and password are required.'});let u=await db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(username);let sec=await db.prepare('SELECT * FROM login_security WHERE username=?').get(username);if(sec?.locked_until&&new Date(sec.locked_until+'Z')>new Date()){return res.status(423).json({error:'Account locked, try again later.'});}if(sec?.locked_until){await db.prepare('UPDATE login_security SET failed_count=0,locked_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE username=?').run(username);await logAudit(db,{assessment_id:null,actor:username,action:'login_unlock',details:{label:`Account unlocked: ${username}`,username,ip:req.ip}});sec=null;}if(!u||!verifyPassword(password,u.password_hash)){const count=(sec?.failed_count||0)+1;const locked=count>=5;await db.prepare(`INSERT INTO login_security(username,failed_count,locked_until) VALUES(?,?,CASE WHEN ? THEN ${db.nowPlus(15)} ELSE NULL END) ON CONFLICT(username) DO UPDATE SET failed_count=excluded.failed_count,locked_until=excluded.locked_until,updated_at=CURRENT_TIMESTAMP`).run(username,count,locked?1:0);await logAudit(db,{assessment_id:null,actor:username,action:locked?'login_lockout':'login_failed',details:{label:locked?`Account locked: ${username}`:`Failed login: ${username}`,username,ip:req.ip}});return res.status(locked?423:401).json({error:locked?'Account locked, try again later.':'Invalid username or password.'});}await db.prepare('UPDATE login_security SET failed_count=0,locked_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE username=?').run(username);clearLoginAttempts(req.ip);if(u.mfa_enabled)return res.json({mfa_required:true,mfa_token:issueMfaToken(u.id)});res.json({token:await issueSession(u.id),user:publicUser(u),must_change_password:!!u.must_change_password});}));
 // The unauthenticated sign-off verification endpoint is deliberately public
 // (minimal, PHI-free payload) so a document recipient can check a signature
 // without an account. Everything else stays authenticated.
-app.use((req,res,next)=>req.path==='/api/health'||req.path==='/api/auth/login'||req.path==='/api/auth/mfa/verify'||req.path==='/api/auth/sso/status'||req.path==='/api/auth/sso/login'||req.path==='/api/auth/sso/callback'||req.path.startsWith('/api/verify/sign-off/')?next():requireAuth(req,res,next));
+app.use((req,res,next)=>req.path==='/api/health'||req.path==='/api/auth/login'||req.path==='/api/auth/mfa/verify'||req.path==='/api/auth/sso/status'||req.path==='/api/auth/sso/login'||req.path==='/api/auth/sso/callback'||req.path==='/api/stripe/webhook'||req.path.startsWith('/api/verify/sign-off/')?next():requireAuth(req,res,next));
 registerSsoRoutes(app);
 const mfaAttemptKey = id => `mfa:${id}`;
 const mfaFailures = new Map();
@@ -507,6 +508,88 @@ app.get('/api/admin/audit-log', requireRole('admin'), ah(async (req, res) => {
   return { ...r, details };
  }));
 }));
+// --- Subscription billing (Stripe, TEST MODE for this milestone) ---
+// Admin-only surface; the client never sees a Stripe key. The webhook is the
+// sole unauthenticated billing route: Stripe signs every delivery and the
+// handler verifies the signature before touching the DB, then acks fast.
+const billingConfigured = () => {
+ if (stripeClient()) return null;
+ return 'Billing is not configured (STRIPE_SECRET_KEY is not set on the server).';
+};
+app.get('/api/billing/plans', requireRole('admin'), ah(async (req, res) => {
+ const missing = billingConfigured();
+ if (missing) return res.status(503).json({ error: missing });
+ const prices = await ensurePlans();
+ res.json(PLANS.map((p) => ({
+  key: p.key, label: p.label, description: p.description,
+  price_label: p.price_label, amount: p.amount, currency: 'usd', interval: 'month',
+  price_id: prices[p.key],
+ })));
+}));
+app.post('/api/billing/checkout', requireRole('admin'), ah(async (req, res) => {
+ const planKey = req.body?.plan_key;
+ const quantity = Number(req.body?.quantity);
+ if (!planKey || !PLAN_KEYS.includes(planKey)) return res.status(400).json({ error: `plan_key is required and must be one of: ${PLAN_KEYS.join(', ')}.` });
+ if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) return res.status(400).json({ error: 'quantity must be an integer between 1 and 500.' });
+ const missing = billingConfigured();
+ if (missing) return res.status(503).json({ error: missing });
+ const me = await db.prepare('SELECT id, username, email FROM users WHERE id=?').get(req.user.id);
+ const session = await createCheckoutSession({
+  userId: me.id, username: me.username, email: me.email, planKey, quantity, baseUrl: appBaseUrl(),
+ });
+ await logAudit(db, { assessment_id: null, actor: auditActor(req), action: 'billing_checkout_started', details: {
+  label: `Checkout started: ${planByKey(planKey).label} × ${quantity}`, plan_key: planKey, quantity,
+  session_id: session.id,
+ } });
+ res.json({ session_id: session.id, url: session.url });
+}));
+app.get('/api/billing/status', requireRole('admin'), ah(async (req, res) => {
+ res.json(await statusForUser(db, req.user.id));
+}));
+app.post('/api/billing/cancel', requireRole('admin'), ah(async (req, res) => {
+ const missing = billingConfigured();
+ if (missing) return res.status(503).json({ error: missing });
+ const current = await statusForUser(db, req.user.id);
+ if (!current || !['active', 'trialing', 'past_due', 'incomplete'].includes(current.status)) {
+  return res.status(400).json({ error: 'No active subscription to cancel.' });
+ }
+ const st = stripeClient();
+ const sub = await st.subscriptions.cancel(current.subscription_id);
+ // The customer.subscription.deleted webhook marks the local row canceled; if
+ // it has not arrived yet, sync status here so the UI reflects it immediately.
+ await db.prepare('UPDATE subscriptions SET status=?, current_period_end=?, cancel_at_period_end=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
+  .run(sub.status || 'canceled', sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString().slice(0, 19).replace('T', ' ') : null, sub.cancel_at_period_end ? 1 : 0, current.id);
+ await logAudit(db, { assessment_id: null, actor: auditActor(req), action: 'billing_subscription_canceled', details: {
+  label: `Subscription canceled: ${current.plan_label || current.plan_key}`, subscription_id: current.subscription_id,
+ } });
+ res.json(await statusForUser(db, req.user.id));
+}));
+// Stripe-signed webhook. Returns fast; only safe payloads leave the handler.
+app.post('/api/stripe/webhook', async (req, res) => {
+ const st = stripeClient();
+ if (!st || !WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe webhook is not configured.' });
+ const sig = req.get('stripe-signature');
+ if (!sig) return res.status(400).json({ error: 'Missing stripe-signature header.' });
+ let event;
+ try {
+  event = st.webhooks.constructEvent(req.rawBody, sig, WEBHOOK_SECRET);
+ } catch (err) {
+  console.error('stripe webhook signature verification failed:', err.message);
+  return res.status(400).json({ error: 'Invalid signature.' });
+ }
+ try {
+  const summary = await handleWebhookEvent(event, db);
+  await logAudit(db, { assessment_id: null, actor: 'stripe', action: 'stripe_webhook', details: {
+   label: `Stripe webhook: ${event.type}`, event_type: event.type,
+   subscription_id: event.data && event.data.object ? event.data.object.id : null,
+  } });
+  res.json({ received: true, event: event.type, summary });
+ } catch (err) {
+  // 500 so Stripe retries the delivery; nothing secret is echoed.
+  console.error('stripe webhook handling failed:', err);
+  res.status(500).json({ error: 'Webhook handling failed.' });
+ }
+});
 app.use((err,_,res,__)=>(console.error(err),res.status(500).json({error:'Internal server error.'})));
 export { app };
 // Boot: wait for schema creation/migration (instant for SQLite, async for
