@@ -144,12 +144,12 @@ export const CRISIS_DEBRIEF_STEPS = [
 // ---------------------------------------------------------------------------
 
 /** Load assessment + client + behaviors + hypotheses; null when assessment missing. */
-function loadContext(assessmentId) {
- const a = db.prepare('SELECT * FROM assessments WHERE id=? AND deleted_at IS NULL').get(assessmentId);
+async function loadContext(assessmentId) {
+ const a = await db.prepare('SELECT * FROM assessments WHERE id=? AND deleted_at IS NULL').get(assessmentId);
  if (!a) return null;
- const client = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(a.client_id);
- const behaviors = db.prepare('SELECT * FROM target_behaviors WHERE assessment_id=? ORDER BY id').all(assessmentId);
- const hypRows = db.prepare('SELECT * FROM function_hypotheses WHERE assessment_id=? ORDER BY target_behavior_id').all(assessmentId);
+ const client = await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(a.client_id);
+ const behaviors = await db.prepare('SELECT * FROM target_behaviors WHERE assessment_id=? ORDER BY id').all(assessmentId);
+ const hypRows = await db.prepare('SELECT * FROM function_hypotheses WHERE assessment_id=? ORDER BY target_behavior_id').all(assessmentId);
  return { a, client, behaviors, hypRows };
 }
 
@@ -212,8 +212,8 @@ const withSuggested = (list) => list.map((text) => ({ text, note: SUGGESTED_NOTE
  * prompting-hierarchy note and blank mastery-criteria fields for the BCBA to
  * complete on the printed document.
  */
-export function buildBip(assessmentId) {
- const ctx = loadContext(assessmentId);
+export async function buildBip(assessmentId) {
+ const ctx = await loadContext(assessmentId);
  if (!ctx) return null;
  const { a, client, behaviors, hypRows } = ctx;
  const hypByBehavior = new Map(hypRows.map((h) => [h.target_behavior_id, h]));
@@ -261,14 +261,14 @@ export function buildBip(assessmentId) {
  return {
   ...buildHeader(a, client),
   behaviors: behaviorSections,
-  data_points_count: db.prepare('SELECT COUNT(*) AS c FROM data_points WHERE assessment_id=?').get(assessmentId).c,
+  data_points_count: (await db.prepare('SELECT COUNT(*) AS c FROM data_points WHERE assessment_id=?').get(assessmentId)).c,
   // role_code links each printed signature line to the matching sign_offs row
   // (bcba / guardian / supervisor / other) so a signed record fills the line.
   signatures: [
    { role: 'BCBA / Behavior Analyst', role_code: 'bcba', fields: ['Signature', 'Printed name & credentials', 'Date'] },
    { role: 'Parent / Guardian', role_code: 'guardian', fields: ['Signature', 'Printed name', 'Date'] },
   ],
-  sign_offs: signOffsFor(assessmentId, 'bip'),
+  sign_offs: await signOffsFor(assessmentId, 'bip'),
  };
 }
 
@@ -282,8 +282,8 @@ export function buildBip(assessmentId) {
  * != none). When none exist the payload carries an explicit empty-state note
  * instead of fabricated content.
  */
-export function buildCrisisPlan(assessmentId) {
- const ctx = loadContext(assessmentId);
+export async function buildCrisisPlan(assessmentId) {
+ const ctx = await loadContext(assessmentId);
  if (!ctx) return null;
  const { a, client, behaviors, hypRows } = ctx;
  const hypByBehavior = new Map(hypRows.map((h) => [h.target_behavior_id, h]));
@@ -324,7 +324,7 @@ export function buildCrisisPlan(assessmentId) {
    { role: 'BCBA / Behavior Analyst', role_code: 'bcba', fields: ['Signature', 'Printed name & credentials', 'Date'] },
    { role: 'Program / Site Supervisor', role_code: 'supervisor', fields: ['Signature', 'Printed name', 'Date'] },
   ],
-  sign_offs: signOffsFor(assessmentId, 'crisis_plan'),
+  sign_offs: await signOffsFor(assessmentId, 'crisis_plan'),
  };
 }
 
@@ -346,8 +346,8 @@ const DATA_SHEET_ROWS = 20;
  * Rows are empty strings — the sheet is a paper-ready capture form, one per
  * behavior, with the value column labeled by that behavior's measurement type.
  */
-export function buildDataSheet(assessmentId) {
- const ctx = loadContext(assessmentId);
+export async function buildDataSheet(assessmentId) {
+ const ctx = await loadContext(assessmentId);
  if (!ctx) return null;
  const { a, client, behaviors } = ctx;
 

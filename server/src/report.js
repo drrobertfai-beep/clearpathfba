@@ -54,13 +54,13 @@ function deriveInterpretation(ev, fn, confidence) {
  * Assemble the full report payload for one assessment.
  * @returns {object|null} null when the assessment does not exist.
  */
-export function buildReport(assessmentId) {
- const a = db.prepare('SELECT * FROM assessments WHERE id=? AND deleted_at IS NULL').get(assessmentId);
+export async function buildReport(assessmentId) {
+ const a = await db.prepare('SELECT * FROM assessments WHERE id=? AND deleted_at IS NULL').get(assessmentId);
  if (!a) return null;
- const client = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(a.client_id);
- const behaviors = db.prepare('SELECT * FROM target_behaviors WHERE assessment_id=? ORDER BY id').all(assessmentId);
- const points = db.prepare('SELECT * FROM data_points WHERE assessment_id=? ORDER BY recorded_at, id').all(assessmentId);
- const hypRows = db.prepare('SELECT * FROM function_hypotheses WHERE assessment_id=? ORDER BY target_behavior_id').all(assessmentId);
+ const client = await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(a.client_id);
+ const behaviors = await db.prepare('SELECT * FROM target_behaviors WHERE assessment_id=? ORDER BY id').all(assessmentId);
+ const points = await db.prepare('SELECT * FROM data_points WHERE assessment_id=? ORDER BY recorded_at, id').all(assessmentId);
+ const hypRows = await db.prepare('SELECT * FROM function_hypotheses WHERE assessment_id=? ORDER BY target_behavior_id').all(assessmentId);
 
  const byBehavior = new Map(behaviors.map((b) => [b.id, []]));
  for (const p of points) if (byBehavior.has(p.target_behavior_id)) byBehavior.get(p.target_behavior_id).push(p);
@@ -176,7 +176,7 @@ export function buildReport(assessmentId) {
    { role: 'BCBA / Behavior Analyst', role_code: 'bcba', fields: ['Signature', 'Printed name & credentials', 'Date'] },
    { role: 'Parent / Guardian', role_code: 'guardian', fields: ['Signature', 'Printed name', 'Date'] },
   ],
-  sign_offs: signOffsFor(assessmentId, 'fba_report'),
+  sign_offs: await signOffsFor(assessmentId, 'fba_report'),
   generated_at: new Date().toISOString(),
   is_preliminary: a.status !== 'completed',
  };
