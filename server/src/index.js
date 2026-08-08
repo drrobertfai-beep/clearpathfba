@@ -40,6 +40,34 @@ const BEHAVIOR_FIELDS = ['name', 'operational_definition', 'safety_classificatio
 const DATA_POINT_FIELDS = ['target_behavior_id', 'recorded_at', 'setting', 'antecedent', 'behavior', 'consequence', 'measurement_type', 'value', 'notes'];
 const changedFields = (oldRow, newRow, fields) => fields.filter((f) => JSON.stringify(oldRow?.[f] ?? null) !== JSON.stringify(newRow?.[f] ?? null));
 const setFields = (row, fields) => fields.filter((f) => row?.[f] != null && row[f] !== '');
+// Optimistic-concurrency guard for the mutable clinical records (clients,
+// assessments, target behaviors). A PUT body may carry the last updated_at the
+// client observed (`base_updated_at`, the 'YYYY-MM-DD HH:MM:SS' UTC string
+// every read returns). When the stored updated_at has moved on, the write is
+// rejected with 409 plus the current server record so the client can resolve.
+// Timestamps are compared in normalized digits so an equivalent ISO-8601
+// spelling (e.g. 'T'/'Z' separators or milliseconds) still matches. If no
+// base_updated_at is supplied the write proceeds — backward compatible with
+// the existing UI, which does not send it yet. Data points are append-only by
+// design and are deliberately not guarded.
+const normTs = (s) => String(s ?? '').replace(/[-T:.Z ]/g, '').slice(0, 14);
+function conflict(res, stored, baseUpdatedAt, entity) {
+ const base = normTs(baseUpdatedAt);
+ if (!base) return false;
+ const current = stored?.updated_at == null ? null : normTs(stored.updated_at);
+ if (current !== null && current !== base) {
+  res.status(409).json({
+   error: 'Conflict: this record was changed by someone else after you loaded it. Reload the record and try again.',
+   conflict: true,
+   entity,
+   id: stored.id,
+   base_updated_at: String(baseUpdatedAt).trim(),
+   current: stored,
+  });
+  return true;
+ }
+ return false;
+}
 const DOCUMENT_TYPES = ['fba_report', 'bip', 'crisis_plan'];
 const SIGNATORY_ROLES = ['bcba', 'guardian', 'supervisor', 'other'];
 // The document payload builders used by the JSON/Word/PDF export routes. The
@@ -180,7 +208,7 @@ app.get('/api/health', (_,res)=>res.json({ok:true, mode: db.mode}));
 app.get('/api/clients', ah(async(_,res)=>res.json((await select.all()).map(row))));
 app.get('/api/clients/:id', ah(async(req,res)=>{ const c=row(await db.prepare('SELECT id, first_name, last_name, date_of_birth, gender, consent_status, dbhds_flags, notes, created_at, updated_at FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id)); if(!c)return res.status(404).json({error:'Client not found.'}); res.json(c); }));
 app.post('/api/clients', ah(async(req,res)=>{const e=validate(req.body);if(e)return res.status(400).json({error:e});const b=req.body;const info=await db.prepare('INSERT INTO clients (first_name,last_name,date_of_birth,gender,consent_status,dbhds_flags,notes) VALUES (?,?,?,?,?,?,?)').run(clean(b.first_name),clean(b.last_name),b.date_of_birth||null,clean(b.gender)||null,b.consent_status||'not_started',JSON.stringify(b.dbhds_flags||{}),clean(b.notes)||null);const created=row(await db.prepare('SELECT * FROM clients WHERE id=?').get(info.lastInsertRowid));await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_created',details:{label:`Client created: ${created.first_name} ${created.last_name}`,entity:'client',id:created.id,changed:setFields(created,CLIENT_FIELDS)}});res.status(201).json(created);}));
-app.put('/api/clients/:id', ah(async(req,res)=>{const e=validate(req.body);if(e)return res.status(400).json({error:e});const old=await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id);if(!old)return res.status(404).json({error:'Client not found.'});const b=req.body;await db.prepare('UPDATE clients SET first_name=?,last_name=?,date_of_birth=?,gender=?,consent_status=?,dbhds_flags=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(clean(b.first_name),clean(b.last_name),b.date_of_birth||null,clean(b.gender)||null,b.consent_status||'not_started',JSON.stringify(b.dbhds_flags||{}),clean(b.notes)||null,req.params.id);const updated=row(await db.prepare('SELECT * FROM clients WHERE id=?').get(req.params.id));await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_updated',details:{label:`Client updated: ${updated.first_name} ${updated.last_name}`,entity:'client',id:updated.id,changed:changedFields(old,updated,CLIENT_FIELDS)}});res.json(updated);}));
+app.put('/api/clients/:id', ah(async(req,res)=>{const e=validate(req.body);if(e)return res.status(400).json({error:e});const old=await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id);if(!old)return res.status(404).json({error:'Client not found.'});const b=req.body;if(conflict(res,row(old),b.base_updated_at,'client'))return;await db.prepare('UPDATE clients SET first_name=?,last_name=?,date_of_birth=?,gender=?,consent_status=?,dbhds_flags=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(clean(b.first_name),clean(b.last_name),b.date_of_birth||null,clean(b.gender)||null,b.consent_status||'not_started',JSON.stringify(b.dbhds_flags||{}),clean(b.notes)||null,req.params.id);const updated=row(await db.prepare('SELECT * FROM clients WHERE id=?').get(req.params.id));await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_updated',details:{label:`Client updated: ${updated.first_name} ${updated.last_name}`,entity:'client',id:updated.id,changed:changedFields(old,updated,CLIENT_FIELDS)}});res.json(updated);}));
 app.delete('/api/clients/:id', ah(async(req,res)=>{const old=await db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(req.params.id);if(!old)return res.status(404).json({error:'Client not found.'});await db.prepare("UPDATE clients SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL").run(req.params.id);await logAudit(db,{assessment_id:null,actor:auditActor(req),action:'client_deleted',details:{label:`Client deleted: ${old.first_name} ${old.last_name}`,entity:'client',id:old.id,changed:['deleted']}});res.status(204).end();}));
 // --- Assessments ---
 const listAssessments = db.prepare(`SELECT a.*, (SELECT COUNT(*) FROM target_behaviors tb WHERE tb.assessment_id=a.id) AS behavior_count
@@ -192,7 +220,7 @@ app.post('/api/clients/:id/assessments', ah(async(req,res)=>{ if(!await clientEx
  const info=await db.prepare('INSERT INTO assessments (client_id,title,status,assessment_date,assessor,notes) VALUES (?,?,?,?,?,?)').run(req.params.id,clean(b.title),b.status||'draft',b.assessment_date||null,clean(b.assessor)||null,clean(b.notes)||null);
  const a=await getAssessment.get(info.lastInsertRowid); await logAudit(db,{assessment_id:Number(info.lastInsertRowid),actor:auditActor(req),action:'assessment_created',details:{label:`Assessment created: ${a.title}`,entity:'assessment',id:a.id,changed:setFields(a,ASSESSMENT_FIELDS)}}); res.status(201).json({...a,behavior_count:0,behaviors:[]}); }));
 app.get('/api/assessments/:id', ah(async(req,res)=>{ const a=await getAssessment.get(req.params.id); if(!a)return res.status(404).json({error:'Assessment not found.'}); res.json({...a,behaviors:await listBehaviors.all(a.id)}); }));
-app.put('/api/assessments/:id', ah(async(req,res)=>{ const old=await getAssessment.get(req.params.id); if(!old)return res.status(404).json({error:'Assessment not found.'}); const e=validateAssessment(req.body); if(e)return res.status(400).json({error:e}); const b=req.body;
+app.put('/api/assessments/:id', ah(async(req,res)=>{ const old=await getAssessment.get(req.params.id); if(!old)return res.status(404).json({error:'Assessment not found.'}); const e=validateAssessment(req.body); if(e)return res.status(400).json({error:e}); const b=req.body; if(conflict(res,old,b.base_updated_at,'assessment'))return;
  await db.prepare('UPDATE assessments SET title=?,status=?,assessment_date=?,assessor=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(clean(b.title),b.status||'draft',b.assessment_date||null,clean(b.assessor)||null,clean(b.notes)||null,req.params.id);
  const a=await getAssessment.get(req.params.id); await logAudit(db,{assessment_id:a.id,actor:auditActor(req),action:'assessment_updated',details:{label:`Assessment updated: ${a.title}`,entity:'assessment',id:a.id,changed:changedFields(old,a,ASSESSMENT_FIELDS)}}); res.json({...a,behaviors:await listBehaviors.all(a.id)}); }));
 app.delete('/api/assessments/:id', ah(async(req,res)=>{ const old=await getAssessment.get(req.params.id); if(!old)return res.status(404).json({error:'Assessment not found.'}); await db.prepare("UPDATE assessments SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL").run(req.params.id); await logAudit(db,{assessment_id:old.id,actor:auditActor(req),action:'assessment_deleted',details:{label:`Assessment deleted: ${old.title}`,entity:'assessment',id:old.id,changed:['deleted']}}); res.status(204).end(); }));
@@ -203,7 +231,7 @@ app.post('/api/assessments/:id/target-behaviors', ah(async(req,res)=>{ if(!await
  const info=await db.prepare('INSERT INTO target_behaviors (assessment_id,name,operational_definition,safety_classification,is_safety_concern,baseline_measurement_type) VALUES (?,?,?,?,?,?)').run(req.params.id,clean(b.name),clean(b.operational_definition),sc,sc!=='none'?1:0,b.baseline_measurement_type||null);
  const created=await db.prepare('SELECT * FROM target_behaviors WHERE id=?').get(info.lastInsertRowid); await logAudit(db,{assessment_id:req.params.id,actor:auditActor(req),action:'behavior_created',details:{label:`Target behavior created: ${created.name}`,entity:'target_behavior',id:created.id,changed:setFields(created,BEHAVIOR_FIELDS)}});
  res.status(201).json(created); }));
-app.put('/api/target-behaviors/:id', ah(async(req,res)=>{ const cur=await db.prepare('SELECT * FROM target_behaviors WHERE id=?').get(req.params.id); if(!cur)return res.status(404).json({error:'Target behavior not found.'}); const e=validateBehavior(req.body); if(e)return res.status(400).json({error:e}); const b=req.body;
+app.put('/api/target-behaviors/:id', ah(async(req,res)=>{ const cur=await db.prepare('SELECT * FROM target_behaviors WHERE id=?').get(req.params.id); if(!cur)return res.status(404).json({error:'Target behavior not found.'}); const e=validateBehavior(req.body); if(e)return res.status(400).json({error:e}); const b=req.body; if(conflict(res,cur,b.base_updated_at,'target_behavior'))return;
  const sc=b.safety_classification||'none';
  await db.prepare('UPDATE target_behaviors SET name=?,operational_definition=?,safety_classification=?,is_safety_concern=?,baseline_measurement_type=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(clean(b.name),clean(b.operational_definition),sc,sc!=='none'?1:0,b.baseline_measurement_type||null,req.params.id);
  const updated=await db.prepare('SELECT * FROM target_behaviors WHERE id=?').get(req.params.id); await logAudit(db,{assessment_id:cur.assessment_id,actor:auditActor(req),action:'behavior_updated',details:{label:`Target behavior updated: ${updated.name}`,entity:'target_behavior',id:updated.id,changed:changedFields(cur,updated,BEHAVIOR_FIELDS)}});

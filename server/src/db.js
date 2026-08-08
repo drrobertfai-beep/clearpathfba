@@ -42,9 +42,15 @@ const PG_URL = process.env.DATABASE_URL;
 // Schema (shared intent; dialect-specific DDL below).
 // ---------------------------------------------------------------------------
 const migrations = {
+ clients: [
+  // Nullable for legacy rows: SQLite cannot ADD COLUMN with a dynamic default.
+  ['updated_at', 'TEXT'],
+ ],
  assessments: [
   ['assessor', 'TEXT'],
   ['deleted_at', 'TEXT'],
+  // Nullable for legacy rows: SQLite cannot ADD COLUMN with a dynamic default.
+  ['updated_at', 'TEXT'],
  ],
  users: [
   ['must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
@@ -53,6 +59,7 @@ const migrations = {
   ['email', 'TEXT'],
  ],
  target_behaviors: [
+  ['updated_at', 'TEXT'],
   ['safety_classification', "TEXT NOT NULL DEFAULT 'none'"],
   ['is_safety_concern', 'INTEGER NOT NULL DEFAULT 0'],
   ['baseline_measurement_type', 'TEXT'],
@@ -325,6 +332,7 @@ function sqliteDb() {
   const existing = new Set(raw.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
   for (const [name, def] of cols) {
    if (!existing.has(name)) raw.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
+   if (name === 'updated_at') raw.prepare(`UPDATE ${table} SET updated_at=CURRENT_TIMESTAMP WHERE updated_at IS NULL`).run();
   }
  }
  return {
@@ -412,7 +420,12 @@ function postgresDb() {
   // Guarded migrations (PG: ADD COLUMN IF NOT EXISTS is idempotent).
   for (const [table, cols] of Object.entries(migrations)) {
    for (const [name, def] of cols) {
-    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${def}`);
+    // Timestamp columns use the native PG type/default even though the shared
+    // migration definition is SQLite-compatible (TEXT), preserving the same
+    // UTC string shape through the adapter for both backends.
+    const pgDef = name === 'updated_at' ? 'TIMESTAMPTZ NOT NULL DEFAULT now()' : def;
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${pgDef}`);
+    if (name === 'updated_at') await pool.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
    }
   }
   return pool;
