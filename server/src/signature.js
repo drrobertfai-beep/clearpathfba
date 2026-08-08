@@ -16,6 +16,12 @@
 //    valid:false / tampered:true.
 //  * The private key is never exposed: keyInfo()/signOffOut() only ever return
 //    the public fingerprint.
+//
+// Backend note: the exported functions return plain values in SQLite mode
+// (synchronous db) and Promises in Postgres mode (async db). Call sites use
+// `await`, which works for both. ensureSigningKey()/keyInfo() are also used
+// synchronously by server/tests/signature.test.mjs, so their SQLite-mode
+// return values stay synchronous.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,6 +34,9 @@ const KEY_FILE = process.env.SIGNING_KEY_FILE || path.join(KEYS_DIR, 'signing.pe
 
 // In-process cache so repeated calls reuse the loaded key without re-reading.
 let cached = null;
+// In-flight dedupe for the Postgres path (two concurrent first-time calls
+// must not both try to INSERT the key row).
+let keyPromise = null;
 
 /** SHA-256 of the SPKI DER public key, first 16 hex chars. */
 export function fingerprintForPublicKey(publicKeyPem) {
@@ -99,16 +108,31 @@ export function verifyDigest(digestHex, signatureB64, publicKeyPem) {
 }
 
 /**
- * Ensure the org signing key exists and is loaded. Idempotent: once the key
- * exists (PEM file + signing_keys row), every subsequent call reuses it.
- * Self-heals a half-initialized state (file without row, or row without file)
- * by regenerating a fresh keypair and rewriting both stores.
+ * Shared body of ensureSigningKey(), parameterized by the row-reader so it can
+ * run against either backend. All db access goes through `dbRow` (a function
+ * returning the first signing_keys row — a value in SQLite mode, a promise in
+ * Postgres mode).
  */
+function keyRecordFrom(privatePem) {
+ const privateKey = crypto.createPrivateKey(privatePem);
+ const publicKeyPem = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
+ const fingerprint = fingerprintForPublicKey(publicKeyPem);
+ return { privateKey, publicKeyPem, fingerprint };
+}
+
+/** Ensure the org signing key exists and is loaded. Idempotent. */
 export function ensureSigningKey() {
  if (cached) return cached;
+ if (db.mode === 'sqlite') return ensureSqlite();
+ if (!keyPromise) {
+  keyPromise = ensurePostgres().then((k) => { cached = k; return k; }).catch((err) => { keyPromise = null; throw err; });
+ }
+ return keyPromise;
+}
+
+function ensureSqlite() {
  const fileExists = fs.existsSync(KEY_FILE);
  const row = db.prepare('SELECT * FROM signing_keys ORDER BY id LIMIT 1').get();
-
  let privatePem = null;
  if (fileExists) {
   try {
@@ -118,32 +142,23 @@ export function ensureSigningKey() {
    privatePem = null;
   }
  }
-
  if (privatePem && row) {
-  const privateKey = crypto.createPrivateKey(privatePem);
-  const publicKeyPem = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
-  const fingerprint = fingerprintForPublicKey(publicKeyPem);
-  // Row and file should agree; if the row is stale, repair it rather than
-  // silently signing with an unrecorded key.
-  if (row.fingerprint !== fingerprint || row.public_key_pem !== publicKeyPem) {
+  const rec = keyRecordFrom(privatePem);
+  if (row.fingerprint !== rec.fingerprint || row.public_key_pem !== rec.publicKeyPem) {
    db.prepare('UPDATE signing_keys SET fingerprint = ?, public_key_pem = ?, created_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE id = ?')
-    .run(fingerprint, publicKeyPem, row.id);
+    .run(rec.fingerprint, rec.publicKeyPem, row.id);
   }
-  cached = { privateKey, publicKeyPem, fingerprint, created_at: row.created_at };
+  cached = { ...rec, created_at: row.created_at };
   return cached;
  }
-
  if (privatePem && !row) {
   // Recover the public key from the private key and record it.
-  const privateKey = crypto.createPrivateKey(privatePem);
-  const publicKeyPem = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
-  const fingerprint = fingerprintForPublicKey(publicKeyPem);
-  const info = db.prepare('INSERT INTO signing_keys (fingerprint, public_key_pem) VALUES (?, ?)').run(fingerprint, publicKeyPem);
+  const rec = keyRecordFrom(privatePem);
+  const info = db.prepare('INSERT INTO signing_keys (fingerprint, public_key_pem) VALUES (?, ?)').run(rec.fingerprint, rec.publicKeyPem);
   const created = db.prepare('SELECT * FROM signing_keys WHERE id = ?').get(info.lastInsertRowid);
-  cached = { privateKey, publicKeyPem, fingerprint, created_at: created.created_at };
+  cached = { ...rec, created_at: created.created_at };
   return cached;
  }
-
  // Fresh generation (or corrupt state: regenerate both stores).
  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
@@ -158,18 +173,67 @@ export function ensureSigningKey() {
  return cached;
 }
 
+async function ensurePostgres() {
+ const fileExists = fs.existsSync(KEY_FILE);
+ const row = await db.prepare('SELECT * FROM signing_keys ORDER BY id LIMIT 1').get();
+ let privatePem = null;
+ if (fileExists) {
+  try {
+   privatePem = fs.readFileSync(KEY_FILE, 'utf8');
+   crypto.createPrivateKey(privatePem); // validates the PEM
+  } catch {
+   privatePem = null;
+  }
+ }
+ if (privatePem && row) {
+  const rec = keyRecordFrom(privatePem);
+  if (row.fingerprint !== rec.fingerprint || row.public_key_pem !== rec.publicKeyPem) {
+   await db.prepare('UPDATE signing_keys SET fingerprint = ?, public_key_pem = ?, created_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE id = ?')
+    .run(rec.fingerprint, rec.publicKeyPem, row.id);
+  }
+  cached = { ...rec, created_at: row.created_at };
+  return cached;
+ }
+ if (privatePem && !row) {
+  // Recover the public key from the private key and record it.
+  const rec = keyRecordFrom(privatePem);
+  const info = await db.prepare('INSERT INTO signing_keys (fingerprint, public_key_pem) VALUES (?, ?)').run(rec.fingerprint, rec.publicKeyPem);
+  const created = await db.prepare('SELECT * FROM signing_keys WHERE id = ?').get(info.lastInsertRowid);
+  cached = { ...rec, created_at: created.created_at };
+  return cached;
+ }
+ // Fresh generation (or corrupt state: regenerate both stores).
+ const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+ const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+ privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+ const fingerprint = fingerprintForPublicKey(publicKeyPem);
+ fs.mkdirSync(KEYS_DIR, { recursive: true });
+ fs.writeFileSync(KEY_FILE, privatePem, { mode: 0o600 });
+ if (row) await db.prepare('DELETE FROM signing_keys WHERE id = ?').run(row.id);
+ const info = await db.prepare('INSERT INTO signing_keys (fingerprint, public_key_pem) VALUES (?, ?)').run(fingerprint, publicKeyPem);
+ const created = await db.prepare('SELECT * FROM signing_keys WHERE id = ?').get(info.lastInsertRowid);
+ cached = { privateKey, publicKeyPem, fingerprint, created_at: created.created_at };
+ return cached;
+}
+
 /** Public key info only — never the private key. */
 export function keyInfo() {
  const k = ensureSigningKey();
+ if (k && typeof k.then === 'function') return k.then((kk) => ({ fingerprint: kk.fingerprint, public_key_pem: kk.publicKeyPem, created_at: kk.created_at }));
  return { fingerprint: k.fingerprint, public_key_pem: k.publicKeyPem, created_at: k.created_at };
 }
 
 /**
  * Sign one document payload. Returns the digest + base64 signature +
  * fingerprint needed to persist on the sign_offs row.
+ * Value in SQLite mode, promise in Postgres mode.
  */
 export function signDocument(payload, documentType) {
  const key = ensureSigningKey();
+ if (key && typeof key.then === 'function') return key.then((k) => finishSign(payload, documentType, k));
+ return finishSign(payload, documentType, key);
+}
+function finishSign(payload, documentType, key) {
  const digest = digestFor(payload, documentType);
  const signature = signDigest(digest, key.privateKey);
  return { digest, signature, fingerprint: key.fingerprint };
@@ -184,13 +248,18 @@ export function signDocument(payload, documentType) {
  *  - tampered       = the current document content no longer matches what was
  *                     signed (or the stored digest/signature were altered).
  *  - digest_matches = recomputed digest equals the stored digest.
+ * Value in SQLite mode, promise in Postgres mode.
  */
 export function verifyDocument(payload, documentType, stored) {
  const storedDigest = stored && stored.digest ? String(stored.digest) : null;
  const digestMatches = !!storedDigest && digestFor(payload, documentType) === storedDigest;
- const keyRow = stored && stored.fingerprint
+ const row = stored && stored.fingerprint
   ? db.prepare('SELECT public_key_pem FROM signing_keys WHERE fingerprint = ?').get(String(stored.fingerprint))
   : null;
+ if (row && typeof row.then === 'function') return row.then((r) => finishVerify(storedDigest, digestMatches, stored, r));
+ return finishVerify(storedDigest, digestMatches, stored, row);
+}
+function finishVerify(storedDigest, digestMatches, stored, keyRow) {
  const sigValid = !!storedDigest && !!keyRow && verifyDigest(storedDigest, stored.signature, keyRow.public_key_pem);
  return { valid: sigValid && digestMatches, tampered: !digestMatches, sig_valid: sigValid, digest_matches: digestMatches };
 }
