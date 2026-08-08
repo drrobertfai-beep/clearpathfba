@@ -14,6 +14,9 @@ Open http://localhost:5173. The API runs on http://localhost:4000 and Vite proxi
 
 For production-style checks: `npm run start --prefix server` and `npm run build --prefix client`.
 
+## Deployment
+Deploy production with `./app-deploy.sh` (builds, deploys, and repoints `app.clearpathfba.com`).
+
 ## Layout
 - `client/`: Vite React UI
 - `server/`: Express REST API, database initialization/migrations, SQLite persistence
