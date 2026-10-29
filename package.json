@@ -6,7 +6,8 @@
     "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
     "seed:demo": "node server/scripts/seed-demo.mjs",
     "pilot:onepager": "node server/scripts/pilot-onepager.mjs",
-    "migrate:orgs": "node server/scripts/migrate-organizations.mjs"
+    "migrate:orgs": "node server/scripts/migrate-organizations.mjs",
+    "org:letterhead": "node server/scripts/org-letterhead.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

@@ -46,9 +46,18 @@ const migrations = {
  organizations: [
   // Optional letterhead contact lines printed under the organization name on
   // every generated document. All nullable and never backfilled: they render
-  // only once the owner supplies them (letterhead.js).
+  // only once the owner supplies them (letterhead.js). The address is split
+  // into its parts so a real practice letterhead (street / suite / city, state
+  // ZIP) prints correctly instead of being crammed into one free-text line;
+  // `fax` and `npi` exist because a billing provider identity needs them.
   ['address_line', 'TEXT'],
+  ['address_line2', 'TEXT'],
+  ['city', 'TEXT'],
+  ['state', 'TEXT'],
+  ['postal_code', 'TEXT'],
   ['phone', 'TEXT'],
+  ['fax', 'TEXT'],
+  ['npi', 'TEXT'],
   ['credential_line', 'TEXT'],
  ],
  clients: [
@@ -96,7 +105,13 @@ CREATE TABLE IF NOT EXISTS organizations (
  slug TEXT UNIQUE NOT NULL,
  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
  address_line TEXT,
+ address_line2 TEXT,
+ city TEXT,
+ state TEXT,
+ postal_code TEXT,
  phone TEXT,
+ fax TEXT,
+ npi TEXT,
  credential_line TEXT,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -242,7 +257,13 @@ CREATE TABLE IF NOT EXISTS organizations (
  slug TEXT UNIQUE NOT NULL,
  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
  address_line TEXT,
+ address_line2 TEXT,
+ city TEXT,
+ state TEXT,
+ postal_code TEXT,
  phone TEXT,
+ fax TEXT,
+ npi TEXT,
  credential_line TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

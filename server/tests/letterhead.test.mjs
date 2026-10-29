@@ -36,7 +36,7 @@ const { app, bootstrap } = await import('../src/index.js');
 const db = (await import('../src/db.js')).default;
 const { hashPassword } = await import('../src/auth.js');
 const { ensureOrg, backfillOrganizations, PLATFORM_ADMIN_ACCOUNTS } = await import('../src/org-migration.js');
-const { buildLetterhead, letterheadForClient, ensureLetterhead, PRODUCT_NAME } = await import('../src/letterhead.js');
+const { buildLetterhead, letterheadForClient, ensureLetterhead, PRODUCT_NAME, streetLine, cityLine, contactLine } = await import('../src/letterhead.js');
 const { buildReport } = await import('../src/report.js');
 const { digestFor } = await import('../src/signature.js');
 
@@ -211,10 +211,13 @@ before(async () => {
  await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
  baseUrl = `http://127.0.0.1:${server.address().port}`;
 
- // Organization A: the owner's practice, with every optional contact line set.
+ // Organization A: the owner's practice, with every optional contact field set
+ // exactly as the real letterhead needs it (split address, phone, fax, NPI).
  fx.orgA = await ensureOrg(db, { name: 'Pederec Inc', slug: 'letterhead-org-a' });
- await db.prepare('UPDATE organizations SET address_line=?, phone=?, credential_line=? WHERE id=?')
-  .run('123 Example Street, Suite 200, Richmond, VA 23219', '(804) 555-0100', 'Virginia DBHDS-licensed provider', fx.orgA.id);
+ await db.prepare(`UPDATE organizations SET address_line=?, address_line2=?, city=?, state=?, postal_code=?,
+  phone=?, fax=?, npi=?, credential_line=? WHERE id=?`)
+  .run('2002 Orange Rd', 'Suite 106', 'Culpeper', 'VA', '22701',
+   '757-544-9140', '757-935-0240', '1396347340', 'Virginia DBHDS-licensed provider', fx.orgA.id);
 
  // Organization B: no contact lines at all — a name-only letterhead.
  fx.orgB = await ensureOrg(db, { name: 'Bright Path ABA', slug: 'letterhead-org-b' });
@@ -276,9 +279,11 @@ test('all five documents carry their own organization name (two orgs, isolated)'
 
 test('optional contact lines render only when supplied', async () => {
  const reportA = (await api(fx.tokenA, 'GET', `/api/assessments/${fx.assessA.id}/report`)).json;
+ // The real practice letterhead: street+suite, city/state/ZIP, one contact line.
  assert.deepEqual(reportA.letterhead.lines, [
-  '123 Example Street, Suite 200, Richmond, VA 23219',
-  '(804) 555-0100',
+  '2002 Orange Rd, Suite 106',
+  'Culpeper, VA 22701',
+  'Phone 757-544-9140 · Fax 757-935-0240 · NPI 1396347340',
   'Virginia DBHDS-licensed provider',
  ]);
 
@@ -288,7 +293,36 @@ test('optional contact lines render only when supplied', async () => {
  assert.deepEqual(reportB.letterhead.lines, []);
  assert.equal(reportB.letterhead.address_line, '');
  assert.equal(reportB.letterhead.phone, '');
+ assert.equal(reportB.letterhead.fax, '');
+ assert.equal(reportB.letterhead.npi, '');
  assert.equal(reportB.letterhead.credential_line, '');
+});
+
+test('letterhead parts are assembled from whichever fields are supplied', () => {
+ // Street only, no suite: no dangling ", ".
+ assert.deepEqual(streetLine({ address_line: '2002 Orange Rd', address_line2: null }), '2002 Orange Rd');
+ assert.deepEqual(streetLine({ address_line: '  ', address_line2: 'Suite 106' }), 'Suite 106');
+ assert.equal(streetLine({}), '');
+ // City line: every combination, never a stray comma or double space.
+ assert.equal(cityLine({ city: 'Culpeper', state: 'VA', postal_code: '22701' }), 'Culpeper, VA 22701');
+ assert.equal(cityLine({ city: 'Culpeper', postal_code: '22701' }), 'Culpeper 22701');
+ assert.equal(cityLine({ state: 'VA', postal_code: '22701' }), 'VA 22701');
+ assert.equal(cityLine({ city: 'Culpeper' }), 'Culpeper');
+ assert.equal(cityLine({}), '');
+ // Contact line: only the items supplied, single separator between them.
+ assert.equal(contactLine({ phone: '757-544-9140' }), 'Phone 757-544-9140');
+ assert.equal(contactLine({ fax: '757-935-0240', npi: '1396347340' }), 'Fax 757-935-0240 · NPI 1396347340');
+ assert.equal(contactLine({}), '');
+
+ // A partial letterhead prints only the lines that exist — no empty rows.
+ const partial = buildLetterhead({ id: 9, name: 'Partial Practice', city: 'Culpeper', state: 'VA', npi: '1396347340' });
+ assert.deepEqual(partial.lines, ['Culpeper, VA', 'NPI 1396347340']);
+ assert.equal(partial.is_fallback, false);
+
+ // Every field is nullable: an organization row with all contact columns NULL.
+ const bare = buildLetterhead({ id: 9, name: 'Bare Practice', address_line: null, address_line2: null, city: null, state: null, postal_code: null, phone: null, fax: null, npi: null, credential_line: null });
+ assert.deepEqual(bare.lines, []);
+ assert.equal(bare.name, 'Bare Practice');
 });
 
 // ---------------------------------------------------------------------------
@@ -345,8 +379,9 @@ test('de-identified documents still carry the organization name', async () => {
   // ... and the organization letterhead survives (an org name is not PHI).
   assert.equal(doc.letterhead.name, 'Pederec Inc', `${d.key} keeps the org letterhead when de-identified`);
   assert.deepEqual(doc.letterhead.lines, [
-   '123 Example Street, Suite 200, Richmond, VA 23219',
-   '(804) 555-0100',
+   '2002 Orange Rd, Suite 106',
+   'Culpeper, VA 22701',
+   'Phone 757-544-9140 · Fax 757-935-0240 · NPI 1396347340',
    'Virginia DBHDS-licensed provider',
   ]);
  }
