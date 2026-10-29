@@ -593,7 +593,10 @@ export default function ReportView({ doc, docType, onBack, onSwitch, onRefreshDo
  const fullName = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
  const meta = DOC_META[docType] || DOC_META.report;
  const docTitle = docType === 'report' ? (assessment.title || meta.fallback) : `${assessment.title ? `${assessment.title} — ` : ''}${meta.fallback}`;
- const signable = docType !== 'dataSheet';
+ // Only the FBA report, BIP and crisis plan are signable documents (the server
+ // rejects any other document_type). Data sheets are capture forms and a
+ // progress report is a periodic summary, so neither gets a sign-off panel.
+ const signable = docType !== 'dataSheet' && docType !== 'progress';
  const [downloading, setDownloading] = useState(false);
  // De-identified mode: refetch this document with ?deidentified=true and render
  // the PHI-stripped payload. Per-document toggle: resets when switching tabs,
@@ -653,7 +656,7 @@ export default function ReportView({ doc, docType, onBack, onSwitch, onRefreshDo
     ? (deid
       ? <p className="signoff-note no-print">Sign-off management is hidden while De-identified is on — signatory names are stripped from this view.</p>
       : <SignOffPanel assessmentId={assessment.id} docType={docType} docLabel={meta.fallback} onChanged={onRefreshDoc} />)
-    : <p className="signoff-note no-print">Data sheets are capture forms and carry no signatures. Open the FBA Report, BIP, or Crisis Plan to manage sign-offs.</p>}
+    : <p className="signoff-note no-print">{docType === 'progress' ? 'Progress reports are periodic summaries and are not signed — sign the FBA Report, BIP or Crisis Plan instead.' : 'Data sheets are capture forms and carry no signatures. Open the FBA Report, BIP, or Crisis Plan to manage sign-offs.'}</p>}
 
    {doc.deidentified ? <div className="deid-banner"><b>⚠ DE-IDENTIFIED</b><span>{doc.deidentified_header || 'FOR SUPERVISION/RESEARCH ONLY, NOT A TREATMENT RECORD'}</span></div> : null}
 
