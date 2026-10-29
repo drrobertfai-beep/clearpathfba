@@ -56,8 +56,13 @@ const isUnique = (err) => String(err && err.message).includes('UNIQUE');
 export async function ensureOrg(database, { name, slug }) {
   const existing = await database.prepare('SELECT * FROM organizations WHERE slug=?').get(slug);
   if (existing) return existing;
+  // ON CONFLICT DO NOTHING rather than "INSERT then catch the unique error":
+  // on Postgres this migration runs inside the boot transaction, where a
+  // failed statement aborts everything after it, so a lost race must not be an
+  // error at all. The catch below stays as a belt-and-braces guard for any
+  // backend without ON CONFLICT support.
   try {
-    await database.prepare("INSERT INTO organizations (name, slug, status) VALUES (?, ?, 'active')").run(name, slug);
+    await database.prepare('INSERT INTO organizations (name, slug, status) VALUES (?, ?, \'active\') ON CONFLICT(slug) DO NOTHING').run(name, slug);
   } catch (err) {
     if (!isUnique(err)) throw err;
   }
@@ -129,7 +134,10 @@ export async function runOrgMigration(database) {
   if (applied) return { defaultOrg, demoOrg, movedClientIds: [], alreadyApplied: true };
   const { clientIds } = await relocateDemoWorkspace(database);
   try {
-    await database.prepare('INSERT INTO schema_migrations (id) VALUES (?)').run(ORG_MIGRATION_ID);
+    // Same reasoning as ensureOrg: a lost race is not an error. The marker is
+    // written last, so a boot that dies mid-way simply redoes the (idempotent)
+    // move next time.
+    await database.prepare('INSERT INTO schema_migrations (id) VALUES (?) ON CONFLICT(id) DO NOTHING').run(ORG_MIGRATION_ID);
   } catch (err) {
     // Two instances booting at once: the other one recorded the marker.
     if (!isUnique(err)) throw err;
