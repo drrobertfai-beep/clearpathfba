@@ -1,1 +1,14 @@
-{"name":"clearpathfba","private":true,"scripts":{"install:all":"npm install --prefix server && npm install --prefix client","dev":"concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"","seed:demo":"node server/scripts/seed-demo.mjs","pilot:onepager":"node server/scripts/pilot-onepager.mjs"},"devDependencies":{"concurrently":"^9.1.0"}}
+{
+  "name": "clearpathfba",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "seed:demo": "node server/scripts/seed-demo.mjs",
+    "pilot:onepager": "node server/scripts/pilot-onepager.mjs",
+    "migrate:orgs": "node server/scripts/migrate-organizations.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

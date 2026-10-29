@@ -6,7 +6,8 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "seed:demo": "node scripts/seed-demo.mjs",
-    "pilot:onepager": "node scripts/pilot-onepager.mjs"
+    "pilot:onepager": "node scripts/pilot-onepager.mjs",
+    "migrate:orgs": "node scripts/migrate-organizations.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
