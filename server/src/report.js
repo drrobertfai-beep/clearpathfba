@@ -7,6 +7,7 @@ import db from './db.js';
 import { LABELS } from './vocab.js';
 import { describeStats, countAbc, topN } from './analysis.js';
 import { signOffsFor } from './audit.js';
+import { letterheadForClient } from './letterhead.js';
 
 const consentLabels = { not_started: 'Not started', in_progress: 'In progress', obtained: 'Obtained', declined: 'Declined' };
 const statusLabels = { draft: 'Draft', in_progress: 'In progress', completed: 'Completed' };
@@ -144,6 +145,9 @@ export async function buildReport(assessmentId) {
  }));
 
  return {
+  // Letterhead of the organization that OWNS THE CLIENT (clients.org_id), not
+  // of the account viewing the document.
+  letterhead: await letterheadForClient(client),
   client: client ? {
    id: client.id, first_name: client.first_name, last_name: client.last_name,
    date_of_birth: client.date_of_birth, gender: client.gender,

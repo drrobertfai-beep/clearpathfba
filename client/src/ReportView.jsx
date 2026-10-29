@@ -36,6 +36,23 @@ const DOC_META = {
 
 const SERIES_COLORS = ['#197d6b', '#2563eb', '#d97706', '#7c3aed', '#16a34a', '#b45309', '#64748b'];
 
+// --- Letterhead ------------------------------------------------------------
+// The organization that owns the client (server-resolved from clients.org_id,
+// so a platform admin viewing another organization's document sees that
+// organization's name). Contact lines are optional and render only when the
+// organization has supplied them; a name-only letterhead still looks deliberate.
+function Letterhead({ letterhead }) {
+ const lh = letterhead || {};
+ const name = lh.name || 'ClearPathFBA';
+ const lines = Array.isArray(lh.lines) ? lh.lines.filter(Boolean) : [];
+ return (
+  <div className="letterhead">
+   <div className="letterhead-name">{name}</div>
+   {lines.map((line, i) => <div className="letterhead-line" key={i}>{line}</div>)}
+  </div>
+ );
+}
+
 // --- Frequency per day per behavior: SVG grouped bar chart ---
 function FrequencyChart({ dates, series }) {
  if (!dates || !dates.length) return <p className="report-empty">No frequency-measured data points were recorded, so no frequency chart can be shown.</p>;
@@ -659,6 +676,8 @@ export default function ReportView({ doc, docType, onBack, onSwitch, onRefreshDo
     : <p className="signoff-note no-print">{docType === 'progress' ? 'Progress reports are periodic summaries and are not signed — sign the FBA Report, BIP or Crisis Plan instead.' : 'Data sheets are capture forms and carry no signatures. Open the FBA Report, BIP, or Crisis Plan to manage sign-offs.'}</p>}
 
    {doc.deidentified ? <div className="deid-banner"><b>⚠ DE-IDENTIFIED</b><span>{doc.deidentified_header || 'FOR SUPERVISION/RESEARCH ONLY, NOT A TREATMENT RECORD'}</span></div> : null}
+
+   <Letterhead letterhead={doc.letterhead} />
 
    <div className="report-header">
     <div className="eyebrow">{meta.eyebrow}</div>

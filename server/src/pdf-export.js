@@ -1,6 +1,27 @@
 import PDFDocument from 'pdfkit';
 import { DEIDENTIFIED_HEADER } from './deidentify.js';
+import { PRODUCT_NAME } from './letterhead.js';
 const s = (v) => v == null || v === '' ? '—' : String(v);
+// Organization letterhead (the client's organization, resolved server-side in
+// letterhead.js). Contact lines are optional and print only when supplied, so a
+// name-only letterhead still reads as deliberate.
+function letterheadBlock(d, p) {
+ const lh = p.letterhead || {};
+ const name = lh.name || PRODUCT_NAME;
+ const contact = Array.isArray(lh.lines) ? lh.lines.filter(Boolean) : [];
+ d.fontSize(16).font('Helvetica-Bold').fillColor('#123f39').text(name);
+ if (contact.length) {
+  d.fontSize(9).font('Helvetica').fillColor('#55726d');
+  for (const line of contact) d.text(String(line));
+ }
+ d.fillColor('#000000');
+ d.moveDown(0.45);
+ const y = d.y;
+ d.moveTo(d.page.margins.left, y).lineTo(d.page.width - d.page.margins.right, y)
+  .lineWidth(0.9).strokeColor('#197d6b').stroke();
+ d.strokeColor('#000000');
+ d.moveDown(0.9);
+}
 const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`;
 function lines(p, title) {
  const c=p.client||{}, a=p.assessment||{};
@@ -11,7 +32,7 @@ function lines(p, title) {
 }
 function addTable(doc, headers, rows) { doc.font('Helvetica-Bold').text(headers.join(' | ')); doc.font('Helvetica').text('-'.repeat(Math.min(110, headers.join(' | ').length))); for (const r of rows) doc.text(r.map(s).join(' | ')); doc.moveDown(.4); }
 function signature(doc,p) { doc.addPage({margin:54}); doc.fontSize(15).font('Helvetica-Bold').text('Signatures'); doc.fontSize(9).font('Helvetica').text('Sign-off records are workflow records; signed sign-offs carry a formal Ed25519 cryptographic signature over the document content and can be verified independently.'); for (const x of (p.signatures||[])) { const so=(p.sign_offs||[]).find(y=>y.signatory_role===x.role_code&&y.status==='signed'); doc.moveDown(.7).fontSize(11).font('Helvetica-Bold').text(s(x.role)); doc.fontSize(10).font('Helvetica').text(so ? `Signed by ${s(so.signatory_name)}${so.signed_at ? ` on ${String(so.signed_at).slice(0,10)}` : ''}` : 'Signature: ______________________________    Printed name: ______________________________    Date: ______________'); if (so && so.signature_algo) doc.fontSize(9).font('Helvetica').text(`Digitally signed (${so.signature_algo}) — key fingerprint ${s(so.signature_key_fingerprint)}`); } }
-function base(p,title,body) { const d=new PDFDocument({margin:54,bufferPages:true}); const chunks=[]; d.on('data',x=>chunks.push(x)); const done=new Promise((resolve,reject)=>{d.on('end',()=>resolve(Buffer.concat(chunks)));d.on('error',reject)}); d.fontSize(18).font('Helvetica-Bold'); for(const x of lines(p,title)) d.text(x).moveDown(.2); d.moveDown(.7).fontSize(11).font('Helvetica'); body(d); signature(d,p); d.end(); return done; }
+function base(p,title,body) { const d=new PDFDocument({margin:54,bufferPages:true}); const chunks=[]; d.on('data',x=>chunks.push(x)); const done=new Promise((resolve,reject)=>{d.on('end',()=>resolve(Buffer.concat(chunks)));d.on('error',reject)}); letterheadBlock(d,p); d.fontSize(18).font('Helvetica-Bold'); for(const x of lines(p,title)) d.text(x).moveDown(.2); d.moveDown(.7).fontSize(11).font('Helvetica'); body(d); signature(d,p); d.end(); return done; }
 export function pdfForReport(p) { return base(p,'Functional Behavior Assessment Report',d=>{ const c=p.client||{}; d.font('Helvetica-Bold').text('Client information');d.font('Helvetica');addTable(d,['Field','Value'],[['Name',`${s(c.first_name)} ${s(c.last_name)}`],['Date of birth',c.date_of_birth],['Gender',c.gender],['Consent',c.consent_status_label]]); d.font('Helvetica-Bold').text('Target behaviors');d.font('Helvetica');addTable(d,['Behavior','Operational definition','Safety','Measurement'],(p.behaviors||[]).map(b=>[b.name,b.operational_definition,b.safety_classification_label,b.baseline_measurement_type_label])); d.font('Helvetica-Bold').text('Data summary');d.font('Helvetica');addTable(d,['Behavior','Observations','Statistics'],(p.data_summary?.per_behavior_stats||[]).map(x=>[x.target_behavior_name,x.stats?.count??(p.data_summary.per_behavior||[]).find(y=>y.target_behavior_id===x.target_behavior_id)?.count,x.stats?.mean!=null?`Mean ${x.stats.mean}`:''])); d.font('Helvetica-Bold').text('ABC analysis');d.font('Helvetica');(p.abc||[]).forEach(x=>d.text(`${x.target_behavior_name}: Top antecedents ${(x.top_antecedents||[]).map(y=>`${y.label} (${y.count})`).join(', ')||'none recorded'}; Top consequences ${(x.top_consequences||[]).map(y=>`${y.label} (${y.count})`).join(', ')||'none recorded'}`)); d.font('Helvetica-Bold').text('Function hypotheses');d.font('Helvetica');addTable(d,['Behavior','Function','Confidence','Rationale'],(p.hypotheses||[]).map(h=>[h.target_behavior_name,h.function_label,pct(h.confidence),`${s(h.rationale)} ${s(h.interpretation)}`])); d.font('Helvetica-Bold').text('Data quality');d.font('Helvetica').text(`ABC completeness: ${pct(p.data_quality?.data_completeness)}`);(p.data_quality?.notes||[]).forEach(x=>d.text(`• ${s(x?.text||x)}`)); }); }
 export function pdfForBip(p) { return base(p,'Behavior Intervention Plan',d=>{(p.behaviors||[]).forEach(b=>{d.font('Helvetica-Bold').text(b.name);d.font('Helvetica').text(`Definition: ${s(b.operational_definition)}\nSafety: ${s(b.safety_classification_label)}\nHypothesized function: ${b.hypothesized_function?`${b.hypothesized_function.function_label} (${pct(b.hypothesized_function.confidence)})`:'Not yet established'}`); for(const [h,xs] of [['Antecedent strategies',b.antecedent_strategies],['Replacement skills',[b.replacement_skills?.description,`Mastery criteria: ____________________    Review interval: ____________________`,b.replacement_skills?.prompting_note]],['Consequence strategies',b.consequence_strategies],['Data collection plan',[b.data_collection_plan?.data_sheet_reference]]]) {d.font('Helvetica-Bold').text(h);d.font('Helvetica');(xs||[]).forEach(x=>d.text(`• ${s(x?.text||x)}`));}}); }); }
 export function pdfForCrisis(p) { return base(p,'Crisis Procedure / Safety Plan',d=>{d.font('Helvetica-Bold').text('Trigger behaviors');d.font('Helvetica');if(p.has_triggers)(p.trigger_behaviors||[]).forEach(b=>d.text(`${b.name}: Definition: ${s(b.operational_definition)} | Classification: ${s(b.safety_classification_label)}\n${s(b.guidance)}`));else d.text(s(p.empty_state_note));d.font('Helvetica-Bold').text('Response steps');d.font('Helvetica');(p.response_steps||[]).forEach((x,i)=>d.text(`${i+1}. ${s(x?.text||x)}`));d.font('Helvetica-Bold').text('Roles');d.font('Helvetica');addTable(d,['Role','Name','Duty'],(p.roles||[]).map(x=>[x.role,x.name,x.duty]));d.font('Helvetica-Bold').text('Debrief');d.font('Helvetica');(p.debrief?.steps||[]).forEach(x=>d.text(`• ${s(x?.text||x)}`));d.text('Debrief date: __________________  Participants: __________________  Review notes: __________________');d.font('Helvetica-Bold').text('Emergency contacts');d.font('Helvetica');addTable(d,['Contact','Details'],[['Primary',p.emergency_contacts?.contact_1],['Secondary',p.emergency_contacts?.contact_2],['Local emergency number',p.emergency_contacts?.local_emergency_number]]); }); }

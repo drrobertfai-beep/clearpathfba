@@ -9,6 +9,7 @@ import { buildProgressReport, parsePeriod } from './reporting.js';
 import { buildBip, buildCrisisPlan, buildDataSheet } from './documents.js';
 import { docxForReport, docxForBip, docxForCrisis, docxForDataSheet, docxForProgressReport, pack } from './docx-export.js';
 import { deidentify } from './deidentify.js';
+import { ensureLetterhead } from './letterhead.js';
 import { pdfForReport, pdfForBip, pdfForCrisis, pdfForDataSheet, pdfForProgressReport } from './pdf-export.js';
 import { assessmentExport, csvExport, importCsv } from './portability.js';
 import { mapClientToPatient, mapAssessmentToResources, bundleResources } from './fhir.js';
@@ -367,8 +368,8 @@ app.get('/api/assessments/:id/report.pdf',ah((req,res)=>sendPdf(req,res,buildRep
 app.get('/api/assessments/:id/bip.pdf',ah((req,res)=>sendPdf(req,res,buildBip,pdfForBip,'BIP','bip')));
 app.get('/api/assessments/:id/crisis-plan.pdf',ah((req,res)=>sendPdf(req,res,buildCrisisPlan,pdfForCrisis,'Crisis_Plan','crisis_plan')));
 app.get('/api/assessments/:id/data-sheet.pdf',ah((req,res)=>sendPdf(req,res,buildDataSheet,pdfForDataSheet,'Data_Sheet','data_sheet')));
-app.get('/api/progress-reports/:id.pdf', ah(async (req,res) => { const row=await findProgressReportInOrg(req.params.id, req.user); if(!row)return res.status(404).json({error:'Progress report not found.'}); try { let p={id:row.id,...JSON.parse(row.payload),created_at:row.created_at}; if(req.query.deidentified==='true')p=deidentify(p); const buf=await pdfForProgressReport(p); res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="${safeFile(p,'Progress_Report')}_${row.period}.pdf"`}); return res.send(buf); } catch(e) { console.error('pdf export failed',e); return res.status(500).json({error:'Unable to generate PDF document.'}); } }));
-app.get('/api/progress-reports/:id.docx', ah(async (req,res) => { const row=await findProgressReportInOrg(req.params.id, req.user); if (!row) return res.status(404).json({ error: 'Progress report not found.' }); const deidentified = req.query.deidentified === 'true'; try { let p={id:row.id,...JSON.parse(row.payload),created_at:row.created_at}; if (deidentified) p = deidentify(p); const buf=await pack(docxForProgressReport(p)); res.set({ 'Content-Type': wordType, 'Content-Disposition': `attachment; filename="${safeFile(p,'Progress_Report')}_${row.period}.docx"` }); return res.send(buf); } catch { return res.status(500).json({error:'Unable to generate Word document.'}); } }));
+app.get('/api/progress-reports/:id.pdf', ah(async (req,res) => { const row=await findProgressReportInOrg(req.params.id, req.user); if(!row)return res.status(404).json({error:'Progress report not found.'}); try { let p=await ensureLetterhead({id:row.id,...JSON.parse(row.payload),created_at:row.created_at}); if(req.query.deidentified==='true')p=deidentify(p); const buf=await pdfForProgressReport(p); res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="${safeFile(p,'Progress_Report')}_${row.period}.pdf"`}); return res.send(buf); } catch(e) { console.error('pdf export failed',e); return res.status(500).json({error:'Unable to generate PDF document.'}); } }));
+app.get('/api/progress-reports/:id.docx', ah(async (req,res) => { const row=await findProgressReportInOrg(req.params.id, req.user); if (!row) return res.status(404).json({ error: 'Progress report not found.' }); const deidentified = req.query.deidentified === 'true'; try { let p=await ensureLetterhead({id:row.id,...JSON.parse(row.payload),created_at:row.created_at}); if (deidentified) p = deidentify(p); const buf=await pack(docxForProgressReport(p)); res.set({ 'Content-Type': wordType, 'Content-Disposition': `attachment; filename="${safeFile(p,'Progress_Report')}_${row.period}.docx"` }); return res.send(buf); } catch { return res.status(500).json({error:'Unable to generate Word document.'}); } }));
 // --- Period progress reports ---
 app.post('/api/assessments/:id/progress-reports', ah(async(req,res) => {
  if (!await assessmentFor(req, req.params.id)) return res.status(404).json({error:'Assessment not found.'});
@@ -385,7 +386,7 @@ app.get('/api/assessments/:id/progress-reports', ah(async(req,res) => {
 }));
 app.get('/api/progress-reports/:id', ah(async(req,res) => {
  const row=await findProgressReportInOrg(req.params.id, req.user); if(!row)return res.status(404).json({error:'Progress report not found.'});
- try { const p={id:row.id,...JSON.parse(row.payload),created_at:row.created_at}; return res.json(req.query.deidentified === 'true' ? deidentify(p) : p); } catch { return res.status(500).json({error:'Stored report payload is invalid.'}); }
+ try { const p=await ensureLetterhead({id:row.id,...JSON.parse(row.payload),created_at:row.created_at}); return res.json(req.query.deidentified === 'true' ? deidentify(p) : p); } catch { return res.status(500).json({error:'Stored report payload is invalid.'}); }
 }));
 // --- Printable support documents (BIP / crisis plan / blank data sheets) ---
 // Same shape and validation as /report: builders in server/src/documents.js.

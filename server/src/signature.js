@@ -66,7 +66,11 @@ export function canonicalStringify(value) {
  * Fields that must not influence the digest: generated_at is a per-call
  * timestamp, and signatures/sign_offs are workflow records about the document
  * (the sign_offs array would otherwise change the instant this row flips to
- * 'signed'). Everything else — client, assessment, behaviors, data, hypotheses,
+ * 'signed'). `letterhead` is excluded for the same reason plus one more: it is
+ * the *provider's* identity (resolved from organizations at render time), not
+ * clinical content, and it can legitimately change when an organization renames
+ * itself — a rename must not turn every previously signed record into
+ * "tampered". Everything else — client, assessment, behaviors, data, hypotheses,
  * strategies — is signed content.
  */
 export function digestPayload(payload) {
@@ -74,6 +78,7 @@ export function digestPayload(payload) {
  delete clone.generated_at;
  delete clone.signatures;
  delete clone.sign_offs;
+ delete clone.letterhead;
  return clone;
 }
 

@@ -64,6 +64,10 @@
 .report-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
 .report-toolbar .link-back{padding:0}
 .report-header{border-bottom:2px solid #197d6b;padding-bottom:18px;margin-bottom:8px}
+/* Organization letterhead: the client's organization, not the viewer's. */
+.letterhead{padding-bottom:12px;margin-bottom:16px;border-bottom:1px solid #d7e5e2}
+.letterhead-name{font-size:17px;font-weight:800;letter-spacing:.2px;color:#123f39;line-height:1.3}
+.letterhead-line{font-size:11.5px;color:#55726d;line-height:1.5}
 .report-header h1{font-size:26px;margin:6px 0 4px}
 .report-sub{color:#58716e;font-size:13.5px;margin-bottom:10px}
 .prelim-badge{display:inline-block;background:#fff0d8;color:#9a661e;border:1px solid #f2e2bd;font-weight:800;font-size:11px;letter-spacing:1px;padding:4px 12px;border-radius:20px}
@@ -237,6 +241,9 @@
  .report-section{break-inside:avoid;page-break-inside:avoid}
  .report-table,.report-hyp,.abc-block,.kpi,.chart{break-inside:avoid;page-break-inside:avoid}
  .report-header{border-bottom-color:#000}
+ .letterhead{border-bottom-color:#000}
+ .letterhead-name{color:#000;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+ .letterhead-line{color:#333}
  .sec-num{background:#000;print-color-adjust:exact;-webkit-print-color-adjust:exact}
  .hbar-fill,.chart-legend i{print-color-adjust:exact;-webkit-print-color-adjust:exact}
  .fn-badge,.safety-badge,.reviewed-badge,.draft-badge,.prelim-badge,.final-badge,.sugg-tag{print-color-adjust:exact;-webkit-print-color-adjust:exact}

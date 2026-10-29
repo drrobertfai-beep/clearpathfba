@@ -43,6 +43,14 @@ const PG_URL = process.env.DATABASE_URL;
 // Schema (shared intent; dialect-specific DDL below).
 // ---------------------------------------------------------------------------
 const migrations = {
+ organizations: [
+  // Optional letterhead contact lines printed under the organization name on
+  // every generated document. All nullable and never backfilled: they render
+  // only once the owner supplies them (letterhead.js).
+  ['address_line', 'TEXT'],
+  ['phone', 'TEXT'],
+  ['credential_line', 'TEXT'],
+ ],
  clients: [
   // Nullable for legacy rows: SQLite cannot ADD COLUMN with a dynamic default.
   ['updated_at', 'TEXT'],
@@ -87,6 +95,9 @@ CREATE TABLE IF NOT EXISTS organizations (
  name TEXT NOT NULL,
  slug TEXT UNIQUE NOT NULL,
  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+ address_line TEXT,
+ phone TEXT,
+ credential_line TEXT,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -230,6 +241,9 @@ CREATE TABLE IF NOT EXISTS organizations (
  name TEXT NOT NULL,
  slug TEXT UNIQUE NOT NULL,
  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+ address_line TEXT,
+ phone TEXT,
+ credential_line TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS schema_migrations (
