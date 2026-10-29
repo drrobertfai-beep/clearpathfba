@@ -1,5 +1,6 @@
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel, WidthType, BorderStyle } from 'docx';
 import { DEIDENTIFIED_HEADER } from './deidentify.js';
+import { PRODUCT_NAME } from './letterhead.js';
 
 const s = (v) => v == null || v === '' ? '—' : String(v);
 const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`;
@@ -8,7 +9,22 @@ const table = (headers, rows) => new Table({ width: { size: 100, type: WidthType
 const heading = (text, level = HeadingLevel.HEADING_1) => new Paragraph({ text: s(text), heading: level });
 const para = (text, bold = false) => new Paragraph({ children: [new TextRun({ text: s(text), bold })] });
 const bullets = (xs, numbered = false) => (xs || []).map((x, i) => new Paragraph({ text: `${numbered ? `${i + 1}. ` : '• '}${s(x?.text || x)}` }));
-const header = (payload, title) => { const c = payload.client || {}, a = payload.assessment || {}; const banner = payload.deidentified ? [new Paragraph({ children: [new TextRun({ text: payload.deidentified_header || DEIDENTIFIED_HEADER, bold: true, color: 'CC0000' })] })] : []; return [...banner, heading(title), para(`Client: ${s(c.first_name)} ${s(c.last_name)} | DOB: ${s(c.date_of_birth)} | Gender: ${s(c.gender)}`), para(`Assessment: ${s(a.title)} | Assessment date: ${s(a.assessment_date)} | Assessor: ${s(a.assessor)}`), para(`Generated: ${new Date(payload.generated_at || Date.now()).toLocaleDateString()} — ${payload.is_preliminary ? 'PRELIMINARY' : 'FINAL'}`, true)]; };
+// Organization letterhead: the client's organization (letterhead.js), with the
+// optional contact lines printed only when the owner has supplied them.
+const letterheadBlock = (payload) => {
+ const lh = payload.letterhead || {};
+ const name = lh.name || PRODUCT_NAME;
+ const contact = Array.isArray(lh.lines) ? lh.lines.filter(Boolean) : [];
+ const rule = { bottom: { style: BorderStyle.SINGLE, size: 8, color: '197D6B' } };
+ const out = [new Paragraph({ children: [new TextRun({ text: name, bold: true, size: 30, color: '123F39' })] })];
+ for (const line of contact) out.push(new Paragraph({ children: [new TextRun({ text: String(line), size: 17, color: '55726D' })] }));
+ // A bordered empty paragraph draws the rule under the letterhead — present
+ // whether or not contact lines were supplied.
+ out.push(new Paragraph({ border: rule, children: [] }));
+ out.push(new Paragraph({ children: [] }));
+ return out;
+};
+const header = (payload, title) => { const c = payload.client || {}, a = payload.assessment || {}; const banner = payload.deidentified ? [new Paragraph({ children: [new TextRun({ text: payload.deidentified_header || DEIDENTIFIED_HEADER, bold: true, color: 'CC0000' })] })] : []; return [...letterheadBlock(payload), ...banner, heading(title), para(`Client: ${s(c.first_name)} ${s(c.last_name)} | DOB: ${s(c.date_of_birth)} | Gender: ${s(c.gender)}`), para(`Assessment: ${s(a.title)} | Assessment date: ${s(a.assessment_date)} | Assessor: ${s(a.assessor)}`), para(`Generated: ${new Date(payload.generated_at || Date.now()).toLocaleDateString()} — ${payload.is_preliminary ? 'PRELIMINARY' : 'FINAL'}`, true)]; };
 const signatures = (payload) => [heading('Signatures'), para('Sign-off records are workflow records; signed sign-offs carry a formal Ed25519 cryptographic signature over the document content and can be verified independently.'), ...(payload.signatures || []).flatMap((x) => { const so = (payload.sign_offs || []).find(y => y.signatory_role === x.role_code && y.status === 'signed'); return [para(x.role, true), para(so ? `Signed by ${s(so.signatory_name)}${so.signed_at ? ` on ${String(so.signed_at).slice(0,10)}` : ''}${so.signature_algo ? ` — Digitally signed (${so.signature_algo}), key fingerprint ${s(so.signature_key_fingerprint)}` : ''}` : 'Signature: ______________________________    Printed name: ______________________________    Date: ______________')]; })];
 const baseDoc = (children) => new Document({ sections: [{ properties: {}, children }] });
 

@@ -10,6 +10,7 @@
 import db from './db.js';
 import { LABELS } from './vocab.js';
 import { signOffsFor } from './audit.js';
+import { letterheadForClient } from './letterhead.js';
 
 const consentLabels = { not_started: 'Not started', in_progress: 'In progress', obtained: 'Obtained', declined: 'Declined' };
 const statusLabels = { draft: 'Draft', in_progress: 'In progress', completed: 'Completed' };
@@ -154,8 +155,10 @@ async function loadContext(assessmentId) {
 }
 
 /** Document header shared by all three documents (mirrors report.js shape). */
-function buildHeader(a, client) {
+async function buildHeader(a, client) {
  return {
+  // Letterhead of the organization that OWNS THE CLIENT (clients.org_id).
+  letterhead: await letterheadForClient(client),
   client: client ? {
    id: client.id, first_name: client.first_name, last_name: client.last_name,
    date_of_birth: client.date_of_birth, gender: client.gender,
@@ -259,7 +262,7 @@ export async function buildBip(assessmentId) {
  });
 
  return {
-  ...buildHeader(a, client),
+  ...(await buildHeader(a, client)),
   behaviors: behaviorSections,
   data_points_count: (await db.prepare('SELECT COUNT(*) AS c FROM data_points WHERE assessment_id=?').get(assessmentId)).c,
   // role_code links each printed signature line to the matching sign_offs row
@@ -290,7 +293,7 @@ export async function buildCrisisPlan(assessmentId) {
  const triggers = behaviors.filter((b) => b.is_safety_concern && b.safety_classification !== 'none');
 
  return {
-  ...buildHeader(a, client),
+  ...(await buildHeader(a, client)),
   has_triggers: triggers.length > 0,
   empty_state_note: triggers.length
    ? null
@@ -352,7 +355,7 @@ export async function buildDataSheet(assessmentId) {
  const { a, client, behaviors } = ctx;
 
  return {
-  ...buildHeader(a, client),
+  ...(await buildHeader(a, client)),
   observation_instructions: 'Record one row per observation. For each observed instance, note the date/time, the setting, the antecedent (what happened just before), the consequence (what happened just after), and the measurement value in the labeled column.',
   rows_per_sheet: DATA_SHEET_ROWS,
   sheets: behaviors.map((b) => ({
