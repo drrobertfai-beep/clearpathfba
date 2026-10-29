@@ -361,6 +361,10 @@ const ORG_INDEXES = [
  'CREATE INDEX IF NOT EXISTS idx_clients_org ON clients(org_id)',
  'CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id)',
 ];
+// Advisory-lock key that serializes Postgres boot (schema + organization
+// migration) across serverless instances. Arbitrary, but must never change:
+// it is how two boots recognise each other.
+const BOOT_LOCK_KEY = 728119001;
 function sqliteDb() {
  const Database = require('better-sqlite3');
  const file = process.env.DATABASE_PATH || path.resolve('data/clearpathfba.sqlite');
@@ -512,24 +516,57 @@ function postgresDb() {
     connectionTimeoutMillis: 6000, query_timeout: 20000, statement_timeout: 20000,
    });
    try {
-    await pool.query(PG_DDL);
-    // Guarded migrations (PG: ADD COLUMN IF NOT EXISTS is idempotent).
-    for (const [table, cols] of Object.entries(migrations)) {
-     for (const [name, def] of cols) {
-      // Timestamp columns use the native PG type/default even though the shared
-      // migration definition is SQLite-compatible (TEXT), preserving the same
-      // UTC string shape through the adapter for both backends.
-      const pgDef = name === 'updated_at' ? 'TIMESTAMPTZ NOT NULL DEFAULT now()' : def;
-      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${pgDef}`);
-      if (name === 'updated_at') await pool.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
+    // Boot is serialized across instances with a transaction-scoped advisory
+    // lock, and the whole schema step + organization migration is ONE
+    // transaction. Both parts of that matter:
+    //
+    //  * `CREATE TABLE IF NOT EXISTS` is NOT safe under concurrency on
+    //    Postgres: two instances cold-starting at the same moment can both pass
+    //    the existence check and one then dies on the catalog unique index
+    //    (`23505 pg_type_typname_nsp_index`) — i.e. a serverless instance fails
+    //    to boot exactly when a deploy first creates a table. Verified: 2 of 3
+    //    simultaneous boots crashed that way before this lock was added.
+    //  * A *transaction* lock (not `pg_advisory_lock`) is the safe kind here:
+    //    production connects through Neon's PgBouncer pooler in transaction
+    //    mode, where session-level locks can leak across client sessions.
+    //  * Running it all in one transaction also means a failure mid-way leaves
+    //    the database untouched instead of half-migrated.
+    //
+    // The lock key is arbitrary but must stay stable across deploys.
+    const client = await pool.connect();
+    try {
+     await client.query('BEGIN');
+     // The wait for another instance's boot counts against statement_timeout;
+     // give the lock + DDL room, then restore the connection's own limit.
+     await client.query("SET LOCAL statement_timeout = 120000");
+     await client.query('SELECT pg_advisory_xact_lock($1)', [BOOT_LOCK_KEY]);
+     await client.query(PG_DDL);
+     // Guarded migrations (PG: ADD COLUMN IF NOT EXISTS is idempotent).
+     for (const [table, cols] of Object.entries(migrations)) {
+      for (const [name, def] of cols) {
+       // Timestamp columns use the native PG type/default even though the shared
+       // migration definition is SQLite-compatible (TEXT), preserving the same
+       // UTC string shape through the adapter for both backends.
+       const pgDef = name === 'updated_at' ? 'TIMESTAMPTZ NOT NULL DEFAULT now()' : def;
+       await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${pgDef}`);
+       if (name === 'updated_at') await client.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
+      }
      }
+     for (const sql of ORG_INDEXES) await client.query(sql);
+     // Organization migration (organizations backfill + the one-time demo
+     // workspace move). Runs against this client directly — NOT through the
+     // public prepare() below, which would await the very promise we are
+     // inside of and deadlock. Inside the transaction every statement must
+     // succeed or none does, so the migration uses ON CONFLICT DO NOTHING
+     // rather than catching a unique violation (which would poison the tx).
+     await runOrgMigration({ prepare: (sql) => pgStatement(client, sql) });
+     await client.query('COMMIT');
+    } catch (err) {
+     try { await client.query('ROLLBACK'); } catch { /* connection-level failure */ }
+     throw err;
+    } finally {
+     client.release();
     }
-    for (const sql of ORG_INDEXES) await pool.query(sql);
-    // Organization migration (organizations backfill + the one-time demo
-    // workspace move). Runs against this pool directly — NOT through the
-    // public prepare() below, which would await the very promise we are
-    // inside of and deadlock.
-    await runOrgMigration({ prepare: (sql) => pgStatement(pool, sql) });
     return pool;
    } catch (err) {
     // The pool may hold a broken client; release it so retries don't leak
