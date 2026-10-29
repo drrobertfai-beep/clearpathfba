@@ -26,8 +26,10 @@
  *   npm run seed:demo
  *   DATABASE_URL=postgres://… npm run seed:demo     # e.g. the pilot database
  */
+import { pathToFileURL } from 'node:url';
 import db from '../src/db.js';
 import { hashPassword, verifyPassword } from '../src/auth.js';
+import { DEMO_ORG as DEMO_ORG_ROW, DEMO_USERNAME, ensureOrg } from '../src/org-migration.js';
 import { analyzeAssessment } from '../src/analysis.js';
 import { buildReport } from '../src/report.js';
 import { signDocument, verifyDocument } from '../src/signature.js';
@@ -35,8 +37,12 @@ import { buildProgressReport } from '../src/reporting.js';
 import { logAudit } from '../src/audit.js';
 
 // --- Demo identity ---------------------------------------------------------
-const DEMO_ORG = 'ClearPathFBA Demo (Sample Data)';
-const DEMO_USERNAME = 'demo@clearpathfba.com';
+// The demo workspace lives in its OWN organization (see server/src/org.js):
+// a demo login must never see a real clinician's clients, and a real
+// organization must never see the sample data. The organization name/slug and
+// the demo username are defined once, in org-migration.js, so the seed and the
+// migration that moves existing demo rows cannot drift apart.
+const DEMO_ORG = DEMO_ORG_ROW.name;
 const DEMO_PASSWORD = 'DemoPilot2026!';
 const DEMO_DISPLAY_NAME = 'Demo Clinician, BCBA (Sample Data)';
 const DEMO_ASSESSOR = 'Demo Clinician, BCBA (sample data)';
@@ -209,14 +215,15 @@ const out = (...a) => console.log(...a);
 // --- Lookup-or-insert helpers ---------------------------------------------
 /** Ensure the demo user exists with the documented password + no forced reset. */
 async function ensureDemoUser() {
+  const org = await ensureOrg(db, DEMO_ORG_ROW);
   const existing = await db.prepare('SELECT * FROM users WHERE username=?').get(DEMO_USERNAME);
   if (!existing) {
     await db.prepare(
-      'INSERT INTO users(username,password_hash,role,display_name,email,active,must_change_password) VALUES (?,?,?,?,?,1,0)'
-    ).run(DEMO_USERNAME, hashPassword(DEMO_PASSWORD), 'bcba', DEMO_DISPLAY_NAME, DEMO_USERNAME);
+      'INSERT INTO users(username,password_hash,role,display_name,email,active,must_change_password,org_id) VALUES (?,?,?,?,?,1,0,?)'
+    ).run(DEMO_USERNAME, hashPassword(DEMO_PASSWORD), 'bcba', DEMO_DISPLAY_NAME, DEMO_USERNAME, org.id);
     created.users += 1;
-    out(`  + user            ${DEMO_USERNAME} (bcba, must_change_password=0)`);
-    return;
+    out(`  + user            ${DEMO_USERNAME} (bcba, must_change_password=0, org=${DEMO_ORG})`);
+    return org;
   }
   // Keep the documented demo credentials true: no forced reset, active, bcba.
   // Only rewrite the password when the stored one no longer matches the docs.
@@ -227,28 +234,38 @@ async function ensureDemoUser() {
   if (existing.role !== 'bcba') patch.role = 'bcba';
   if (existing.display_name !== DEMO_DISPLAY_NAME) patch.display_name = DEMO_DISPLAY_NAME;
   if (existing.email !== DEMO_USERNAME) patch.email = DEMO_USERNAME;
+  // Re-running the seed keeps the demo account inside the demo organization
+  // (covers a row created before organizations existed).
+  if (Number(existing.org_id) !== Number(org.id)) patch.org_id = org.id;
   const keys = Object.keys(patch);
   if (!keys.length) {
     out(`  = user            ${DEMO_USERNAME} (already seeded)`);
-    return;
+    return org;
   }
   await db.prepare(`UPDATE users SET ${keys.map((k) => `${k}=?`).join(',')}, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .run(...keys.map((k) => patch[k]), existing.id);
   out(`  ~ user            ${DEMO_USERNAME} (updated: ${keys.join(', ')})`);
+  return org;
 }
 
-async function ensureClient(spec) {
+async function ensureClient(spec, org) {
   const existing = await db.prepare(
     "SELECT * FROM clients WHERE first_name=? AND last_name=? AND notes LIKE ? AND deleted_at IS NULL"
   ).get(spec.first_name, spec.last_name, `${NOTE_MARKER}%`);
   if (existing) {
-    out(`  = client          ${spec.first_name} ${spec.last_name} (#${existing.id})`);
+    // Keep sample data in the sample-data organization on every run.
+    if (Number(existing.org_id) !== Number(org.id)) {
+      await db.prepare('UPDATE clients SET org_id=? WHERE id=?').run(org.id, existing.id);
+      out(`  ~ client          ${spec.first_name} ${spec.last_name} (#${existing.id}) → org=${DEMO_ORG}`);
+    } else {
+      out(`  = client          ${spec.first_name} ${spec.last_name} (#${existing.id})`);
+    }
     return existing;
   }
   const info = await db.prepare(
-    'INSERT INTO clients (first_name,last_name,date_of_birth,gender,consent_status,dbhds_flags,notes) VALUES (?,?,?,?,?,?,?)'
+    'INSERT INTO clients (org_id,first_name,last_name,date_of_birth,gender,consent_status,dbhds_flags,notes) VALUES (?,?,?,?,?,?,?,?)'
   ).run(
-    spec.first_name, spec.last_name, spec.date_of_birth, spec.gender, spec.consent_status,
+    org.id, spec.first_name, spec.last_name, spec.date_of_birth, spec.gender, spec.consent_status,
     JSON.stringify({ demo: true, organization: DEMO_ORG, seed: 'server/scripts/seed-demo.mjs' }),
     spec.notes,
   );
@@ -439,10 +456,10 @@ async function main() {
   out(`  data periods:      ${PREV_MONTH} (baseline) and ${LAST_MONTH} (current)`);
   out('');
 
-  await ensureDemoUser();
+  const org = await ensureDemoUser();
 
   for (const spec of DEMO_CLIENTS) {
-    const client = await ensureClient(spec);
+    const client = await ensureClient(spec, org);
     const assessment = await ensureAssessment(client, spec.assessment);
     const behaviors = [];
     for (const bSpec of spec.assessment.behaviors) {
@@ -474,11 +491,17 @@ async function main() {
   out('');
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error('');
-    console.error('Demo seed failed:', err && err.message ? err.message : err);
-    if (err && err.stack) console.error(err.stack);
-    process.exit(1);
-  });
+export { main as seedDemo };
+
+// Run only when executed directly (`npm run seed:demo`), so tests can import
+// seedDemo() and drive it against an isolated database.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('');
+      console.error('Demo seed failed:', err && err.message ? err.message : err);
+      if (err && err.stack) console.error(err.stack);
+      process.exit(1);
+    });
+}

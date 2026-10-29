@@ -33,6 +33,7 @@
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
+import { runOrgMigration } from './org-migration.js';
 // better-sqlite3 is a native module; load it lazily (only in SQLite mode) so
 // serverless/Postgres installs that cannot build it still boot cleanly.
 const require = createRequire(import.meta.url);
@@ -45,6 +46,10 @@ const migrations = {
  clients: [
   // Nullable for legacy rows: SQLite cannot ADD COLUMN with a dynamic default.
   ['updated_at', 'TEXT'],
+  // Organization scoping (pass 1): every client belongs to exactly one
+  // organization. Nullable on legacy rows only — the boot migration backfills
+  // it and org.js fails closed for anything still NULL.
+  ['org_id', 'INTEGER REFERENCES organizations(id)'],
  ],
  assessments: [
   ['assessor', 'TEXT'],
@@ -57,6 +62,10 @@ const migrations = {
   ['mfa_secret', 'TEXT'],
   ['mfa_enabled', 'INTEGER NOT NULL DEFAULT 0'],
   ['email', 'TEXT'],
+  ['org_id', 'INTEGER REFERENCES organizations(id)'],
+  // Explicit, auditable "may cross organizations" flag — separate from `role`
+  // on purpose, so an organization admin is NOT a platform admin.
+  ['is_platform_admin', 'INTEGER NOT NULL DEFAULT 0'],
  ],
  target_behaviors: [
   ['updated_at', 'TEXT'],
@@ -73,8 +82,20 @@ const migrations = {
 };
 
 const SQLITE_DDL = `
+CREATE TABLE IF NOT EXISTS organizations (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ name TEXT NOT NULL,
+ slug TEXT UNIQUE NOT NULL,
+ status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS schema_migrations (
+ id TEXT PRIMARY KEY,
+ applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS clients (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
+ org_id INTEGER REFERENCES organizations(id),
  first_name TEXT NOT NULL, last_name TEXT NOT NULL, date_of_birth TEXT,
  gender TEXT, consent_status TEXT NOT NULL DEFAULT 'not_started' CHECK (consent_status IN ('not_started','in_progress','obtained','declined')),
  dbhds_flags TEXT NOT NULL DEFAULT '{}', notes TEXT, deleted_at TEXT,
@@ -157,6 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_progress_reports_assessment ON progress_reports(a
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
  role TEXT NOT NULL CHECK (role IN ('admin','bcba','specialist','staff','supervisor','guardian')), display_name TEXT, email TEXT UNIQUE,
+ org_id INTEGER REFERENCES organizations(id), is_platform_admin INTEGER NOT NULL DEFAULT 0,
  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -203,8 +225,20 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
 //    now() + interval '7 days' (auth.js), lockouts via now() + interval
 //    '15 minutes' (index.js).
 const PG_DDL = `
+CREATE TABLE IF NOT EXISTS organizations (
+ id SERIAL PRIMARY KEY,
+ name TEXT NOT NULL,
+ slug TEXT UNIQUE NOT NULL,
+ status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS schema_migrations (
+ id TEXT PRIMARY KEY,
+ applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS clients (
  id SERIAL PRIMARY KEY,
+ org_id INTEGER REFERENCES organizations(id),
  first_name TEXT NOT NULL, last_name TEXT NOT NULL, date_of_birth TEXT,
  gender TEXT, consent_status TEXT NOT NULL DEFAULT 'not_started' CHECK (consent_status IN ('not_started','in_progress','obtained','declined')),
  dbhds_flags JSONB NOT NULL DEFAULT '{}', notes TEXT, deleted_at TIMESTAMPTZ,
@@ -320,6 +354,13 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
 // ---------------------------------------------------------------------------
 // SQLite mode (default; synchronous, unchanged behavior).
 // ---------------------------------------------------------------------------
+// Organization-scoping indexes. Kept out of the CREATE TABLE batches above
+// because on an existing database the org_id columns they cover only appear
+// when the guarded ALTERs run — so these are executed *after* the migrations.
+const ORG_INDEXES = [
+ 'CREATE INDEX IF NOT EXISTS idx_clients_org ON clients(org_id)',
+ 'CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id)',
+];
 function sqliteDb() {
  const Database = require('better-sqlite3');
  const file = process.env.DATABASE_PATH || path.resolve('data/clearpathfba.sqlite');
@@ -335,7 +376,8 @@ function sqliteDb() {
    if (name === 'updated_at') raw.prepare(`UPDATE ${table} SET updated_at=CURRENT_TIMESTAMP WHERE updated_at IS NULL`).run();
   }
  }
- return {
+ for (const sql of ORG_INDEXES) raw.exec(sql);
+ const api = {
   mode: 'sqlite',
   ready: Promise.resolve(),
   currentTimestamp: 'CURRENT_TIMESTAMP',
@@ -367,6 +409,14 @@ function sqliteDb() {
   },
   exec(sql) { return raw.exec(sql); },
  };
+ // Organization migration (organizations table backfill + the one-time demo
+ // workspace move). The schema above is already complete when this runs; the
+ // data backfill runs here and `await db.ready` waits for it. The statements
+ // inside are synchronous in this mode, so in practice it settles in the same
+ // tick — the promise keeps the call site identical to the Postgres path.
+ api.ready = runOrgMigration(api);
+ api.ready.catch(() => { /* surfaced at `await db.ready`; avoid an unhandled rejection before then */ });
+ return api;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +459,37 @@ function pgError(err) {
  }
  return err;
 }
+// Build the SQLite-shaped statement wrapper over a specific Postgres pool.
+// Bound to a pool (rather than to the module-level `getReady`) so the boot
+// path can run the organization migration against the pool it is already
+// holding, without awaiting — and therefore deadlocking on — `db.ready`.
+function pgStatement(pool, sql) {
+ const isInsert = /^\s*INSERT\b/i.test(sql) && !/\bRETURNING\b/i.test(sql);
+ const text = pgText(sql.replace(/;+\s*$/, ''));
+ const exec = async (method, params) => {
+  try {
+   if (method === 'get') {
+    const r = await pool.query({ text, values: params });
+    return r.rows.length ? mapRows(r.fields, [r.rows[0]])[0] : undefined;
+   }
+   if (method === 'all') {
+    const r = await pool.query({ text, values: params });
+    return mapRows(r.fields, r.rows);
+   }
+   // run: plain INSERTs return the inserted row so tables without an id
+   // column (for example login_security) work too. SQLite's callers use
+   // lastInsertRowid only for tables that actually have an id.
+   const r = await pool.query({ text: isInsert ? `${text} RETURNING *` : text, values: params });
+   const returned = r.rows && r.rows.length ? mapRows(r.fields, [r.rows[0]])[0] : undefined;
+   return { changes: r.rowCount, lastInsertRowid: returned?.id };
+  } catch (err) { throw pgError(err); }
+ };
+ return {
+  get: (...params) => exec('get', params),
+  all: (...params) => exec('all', params),
+  run: (...params) => exec('run', params),
+ };
+}
 function postgresDb() {
  const ssl = process.env.PGSSLMODE
   ? (process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: process.env.PGSSLMODE === 'verify-full' || process.env.PGSSLMODE === 'verify-ca' })
@@ -443,6 +524,12 @@ function postgresDb() {
       if (name === 'updated_at') await pool.query(`UPDATE ${table} SET updated_at=now() WHERE updated_at IS NULL`);
      }
     }
+    for (const sql of ORG_INDEXES) await pool.query(sql);
+    // Organization migration (organizations backfill + the one-time demo
+    // workspace move). Runs against this pool directly — NOT through the
+    // public prepare() below, which would await the very promise we are
+    // inside of and deadlock.
+    await runOrgMigration({ prepare: (sql) => pgStatement(pool, sql) });
     return pool;
    } catch (err) {
     // The pool may hold a broken client; release it so retries don't leak
@@ -462,31 +549,10 @@ function postgresDb() {
   nowPlus: (minutes) => `now() + interval '${minutes} minutes'`,
   orderCi: (col) => `LOWER(${col})`,
   prepare(sql) {
-   const isInsert = /^\s*INSERT\b/i.test(sql) && !/\bRETURNING\b/i.test(sql);
-   const text = pgText(sql.replace(/;+\s*$/, ''));
-   const exec = async (method, params) => {
-    const pool = await getReady();
-    try {
-     if (method === 'get') {
-      const r = await pool.query({ text, values: params });
-      return r.rows.length ? mapRows(r.fields, [r.rows[0]])[0] : undefined;
-     }
-     if (method === 'all') {
-      const r = await pool.query({ text, values: params });
-      return mapRows(r.fields, r.rows);
-     }
-     // run: plain INSERTs return the inserted row so tables without an id
-     // column (for example login_security) work too. SQLite's callers use
-     // lastInsertRowid only for tables that actually have an id.
-     const r = await pool.query({ text: isInsert ? `${text} RETURNING *` : text, values: params });
-     const returned = r.rows && r.rows.length ? mapRows(r.fields, [r.rows[0]])[0] : undefined;
-     return { changes: r.rowCount, lastInsertRowid: returned?.id };
-    } catch (err) { throw pgError(err); }
-   };
    return {
-    get: (...params) => exec('get', params),
-    all: (...params) => exec('all', params),
-    run: (...params) => exec('run', params),
+    get: async (...params) => pgStatement(await getReady(), sql).get(...params),
+    all: async (...params) => pgStatement(await getReady(), sql).all(...params),
+    run: async (...params) => pgStatement(await getReady(), sql).run(...params),
    };
   },
   transaction(fn) {
