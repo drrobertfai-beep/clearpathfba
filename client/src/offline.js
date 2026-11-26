@@ -33,6 +33,7 @@
 
 const QUEUE_KEY = 'clearpath_offline_queue'; // legacy localStorage key (migrated once)
 const BEHAVIOR_PREFIX = 'clearpath_behaviors_';
+const USER_KEY = 'clearpath_user'; // session user written by App.jsx on sign-in
 const SYNC_TAG = 'clearpath-sync';
 const DB_NAME = 'clearpathfba-offline';
 const DB_VERSION = 1;
@@ -42,6 +43,38 @@ const listeners = new Set();
 let dbPromise = null;      // cached IndexedDB open promise
 let memoryQueue = [];      // in-memory mirror of persisted ops (FIFO by queued_at)
 let flushing = false;
+
+// --- Account ownership ---
+// Every queued operation is stamped with the id of the account that created
+// it, and only that account can see or replay it. On a shared clinic computer
+// the next clinician to sign in must never be shown — or silently post under
+// their own token — the previous clinician's unsynced ABC data.
+
+export function currentAccountId() {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    return u && u.id != null ? String(u.id) : null;
+  } catch { return null; }
+}
+
+// An operation belongs to an account only if it was stamped with that id.
+// Unstamped records (written by a build without stamping) belong to nobody
+// until initQueue adopts them for the signed-in account or drops them.
+export function opBelongsTo(op, accountId) {
+  if (!op || op.account_id == null || accountId == null) return false;
+  return String(op.account_id) === String(accountId);
+}
+
+// The operations owned by the signed-in account (the only ones the UI shows
+// and flushQueue replays).
+function myOps() {
+  const acct = currentAccountId();
+  if (!acct) return [];
+  return memoryQueue.filter((o) => opBelongsTo(o, acct));
+}
 
 // --- Pure helpers (unit-testable in Node without IndexedDB) ---
 
@@ -66,6 +99,7 @@ export function buildOperation(payload) {
       notes: payload.notes || '',
     },
     assessment_id: assessmentId,
+    account_id: payload.account_id != null ? String(payload.account_id) : currentAccountId(),
     queued_at: payload.queued_at || new Date().toISOString(),
     attempts: 0,
     last_error: null,
@@ -92,6 +126,7 @@ export function legacyToOperation(entry) {
       notes: entry.notes || '',
     },
     assessment_id: entry.assessment_id,
+    account_id: currentAccountId(),
     queued_at: entry.queued_at,
     attempts: 0,
     last_error: null,
@@ -201,7 +236,28 @@ async function initQueue() {
   const seen = new Set(loaded.map((o) => o.id));
   memoryQueue = sortOps([...loaded, ...memoryQueue.filter((o) => !seen.has(o.id))]);
   try { await migrateLegacy(); } catch {}
+  try { await adoptOrphanOps(); } catch {}
   emit();
+}
+
+// Operations written before account stamping shipped carry no account_id. If a
+// session is still open (same browser session, no sign-out in between) they
+// belong to that account, so stamp them; if nobody is signed in, they are
+// stale PHI on a shared device and are deleted.
+async function adoptOrphanOps() {
+  const acct = currentAccountId();
+  const orphans = memoryQueue.filter((o) => o.account_id == null);
+  if (!orphans.length) return;
+  if (!acct) {
+    memoryQueue = memoryQueue.filter((o) => o.account_id != null);
+    for (const op of orphans) { try { await deleteOp(op.id); } catch {} }
+    return;
+  }
+  const ids = new Set(orphans.map((o) => o.id));
+  memoryQueue = sortOps(memoryQueue.map((o) => (ids.has(o.id) ? { ...o, account_id: acct } : o)));
+  for (const op of memoryQueue.filter((o) => ids.has(o.id))) {
+    try { await putOp(op); } catch {}
+  }
 }
 
 // One-time migration: import any entries left in the old localStorage queue
@@ -234,7 +290,7 @@ async function migrateLegacy() {
 // --- Public API (unchanged surface) ---
 
 export function getQueue() {
-  return memoryQueue.map(operationToView);
+  return myOps().map(operationToView);
 }
 export function getQueueCounts(ops) {
   return {
@@ -243,20 +299,20 @@ export function getQueueCounts(ops) {
   };
 }
 export function getState() {
-  const counts = getQueueCounts(memoryQueue);
+  const counts = getQueueCounts(myOps());
   return { online: typeof navigator !== 'undefined' ? navigator.onLine : true, ...counts };
 }
-export function getConflicts() { return memoryQueue.filter((o) => o.status === 'conflicted').map(operationToView); }
+export function getConflicts() { return myOps().filter((o) => o.status === 'conflicted').map(operationToView); }
 
-export function buildEditOperation({ kind, endpoint, body, record, queued_at }) {
+export function buildEditOperation({ kind, endpoint, body, record, queued_at, account_id }) {
   const now = queued_at || new Date().toISOString();
-  return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2), kind, method: 'PUT', endpoint, body: { ...body, base_updated_at: record?.updated_at }, record_id: record?.id, queued_at: now, created_at: now, attempts: 0, last_error: null, status: 'pending', server_record: null };
+  return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2), kind, method: 'PUT', endpoint, body: { ...body, base_updated_at: record?.updated_at }, record_id: record?.id, account_id: account_id != null ? String(account_id) : currentAccountId(), queued_at: now, created_at: now, attempts: 0, last_error: null, status: 'pending', server_record: null };
 }
 export function enqueueEdit(payload) {
   const op = buildEditOperation(payload); memoryQueue = sortOps([...memoryQueue, op]); emit(); putOp(op).catch(() => {}); requestBackgroundSync(); return operationToView(op);
 }
 export async function resolveConflict(id, choice) {
-  const op = memoryQueue.find((x) => x.id === id);
+  const op = myOps().find((x) => x.id === id);
   if (!op || op.status !== 'conflicted') return { ok: false, error: 'Conflict no longer exists.' };
   if (choice === 'server') { removeQueued(id); return { ok: true, record: op.server_record }; }
   const token = localStorage.getItem('clearpath_token');
@@ -309,12 +365,12 @@ export function enqueuePoint(payload) {
 }
 
 export function removeQueued(uuid) {
-  const before = memoryQueue.length;
+  // Only the owning account may cancel a queued record.
+  const op = myOps().find((o) => o.id === uuid);
+  if (!op) return;
   memoryQueue = memoryQueue.filter((o) => o.id !== uuid);
-  if (memoryQueue.length !== before) {
-    emit();
-    deleteOp(uuid).catch(() => {});
-  }
+  emit();
+  deleteOp(uuid).catch(() => {});
 }
 
 function recordFailure(op, message, extra = {}) {
@@ -330,15 +386,20 @@ function recordFailure(op, message, extra = {}) {
 // stop (server unreachable; next online event / sync / manual retry). Other
 // HTTP errors → record the attempt, keep going so one bad row doesn't block
 // the rest. Returns { synced, failed, stopped }.
+//
+// Only the signed-in account's own operations are replayed: another account's
+// queued records are never posted under this session's token (the server would
+// reject them anyway, silently, since they belong to another organization).
 export async function flushQueue() {
   if (flushing) return { skipped: true, synced: 0, failed: 0, stopped: null };
   flushing = true;
   try {
-    if (!memoryQueue.length) return { synced: 0, failed: 0, stopped: null };
+    const mine = myOps();
+    if (!mine.length) return { synced: 0, failed: 0, stopped: null };
     const token = localStorage.getItem('clearpath_token');
-    if (!token) return { synced: 0, failed: memoryQueue.length, stopped: 'auth' };
+    if (!token) return { synced: 0, failed: mine.length, stopped: 'auth' };
     let synced = 0, failed = 0, stopped = null;
-    for (const op of [...memoryQueue]) {
+    for (const op of mine) {
       if (op.status === 'conflicted') continue;
       try {
         const r = await fetch(op.endpoint, {
@@ -389,14 +450,53 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 }
 
 // --- Target-behavior cache (for offline data entry) ---
+// Scoped by account so cached client data does not outlive the session that
+// cached it on a shared computer.
+function behaviorKey(assessmentId, accountId) {
+  const acct = accountId === undefined ? currentAccountId() : accountId;
+  return `${BEHAVIOR_PREFIX}${acct == null ? 'anon' : acct}_${assessmentId}`;
+}
 export function cacheBehaviors(assessmentId, behaviors) {
-  try { localStorage.setItem(BEHAVIOR_PREFIX + assessmentId, JSON.stringify(behaviors || [])); } catch {}
+  try { localStorage.setItem(behaviorKey(assessmentId), JSON.stringify(behaviors || [])); } catch {}
 }
 export function getCachedBehaviors(assessmentId) {
   try {
-    const raw = localStorage.getItem(BEHAVIOR_PREFIX + assessmentId);
-    return raw ? JSON.parse(raw) : null;
+    const raw = localStorage.getItem(behaviorKey(assessmentId));
+    if (raw) return JSON.parse(raw);
+    // Cache written before account scoping: adopt it for the signed-in account.
+    const legacyKey = BEHAVIOR_PREFIX + assessmentId;
+    const legacyRaw = localStorage.getItem(legacyKey);
+    if (!legacyRaw) return null;
+    const parsed = JSON.parse(legacyRaw);
+    try { localStorage.setItem(behaviorKey(assessmentId), legacyRaw); localStorage.removeItem(legacyKey); } catch {}
+    return parsed;
   } catch { return null; }
+}
+
+// Delete everything this device holds for one account: its queued operations
+// (IndexedDB + the in-memory mirror) and its cached client data. Called on
+// sign-out so unsynced PHI does not stay readable on a shared computer.
+export async function purgeAccount(accountId) {
+  const id = accountId == null ? currentAccountId() : String(accountId);
+  // Unstamped leftovers belong to no account and are purged with any sign-out.
+  const doomed = memoryQueue.filter((o) => o.account_id == null || (id != null && String(o.account_id) === id));
+  memoryQueue = memoryQueue.filter((o) => !doomed.includes(o));
+  emit();
+  for (const op of doomed) {
+    try { await deleteOp(op.id); } catch {}
+  }
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k) keys.push(k); }
+      for (const k of keys) {
+        const scoped = id != null && k.startsWith(`${BEHAVIOR_PREFIX}${id}_`);
+        const legacyUnscoped = /^clearpath_behaviors_\d+$/.test(k);
+        if (scoped || legacyUnscoped) localStorage.removeItem(k);
+      }
+    } catch {}
+  }
+  return { purged: doomed.length };
 }
 
 // Kick off the initial load + migration on app boot (browser only; Node test

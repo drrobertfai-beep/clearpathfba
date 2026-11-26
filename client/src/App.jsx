@@ -1,7 +1,7 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {api,setUnauthorizedHandler,isTransientError} from './api.js';
 import {useWorkspaceBoot,ConnectingScreen,ConnectingNotice,retryDelay,sleep,REQUEST_TIMEOUT_MS} from './boot.jsx';
-import {subscribe as subscribeOffline,getState as getOfflineState,enqueuePoint,isNetworkError,flushQueue,cacheBehaviors,getCachedBehaviors,getQueue,removeQueued,enqueueEdit,getConflicts,resolveConflict} from './offline.js';
+import {subscribe as subscribeOffline,getState as getOfflineState,enqueuePoint,isNetworkError,flushQueue,cacheBehaviors,getCachedBehaviors,getQueue,removeQueued,enqueueEdit,getConflicts,resolveConflict,purgeAccount,currentAccountId} from './offline.js';
 import ReportView from './ReportView.jsx';
 import {QRCodeSVG} from 'qrcode.react';
 const blank={first_name:'',last_name:'',date_of_birth:'',gender:'',consent_status:'not_started',notes:''};
@@ -156,7 +156,11 @@ export default function App(){
  const [offlineMode,setOfflineMode]=useState(false);
  const [,force]=useState(0);
  const cachedUser=useRef(readUser());
- const signOut=()=>{localStorage.clear();cachedUser.current=null;setUser(null);setOfflineMode(false);setPhase('signed_out')};
+ // Sign-out discards this account's offline queue and cached client data, so
+ // unsynced PHI does not stay readable on a shared computer.
+ const signOut=()=>{const acct=currentAccountId();purgeAccount(acct).catch(()=>{});localStorage.clear();cachedUser.current=null;setUser(null);setOfflineMode(false);setPhase('signed_out')};
+ // Explicit logout: warn first when unsynced records would be discarded.
+ const logout=async()=>{const queued=getQueue().length;if(queued>0&&!confirm(`You have ${queued} unsynced offline record${queued===1?'':'s'} for this account. Signing out discards ${queued===1?'it':'them'} permanently — unsynced records cannot be carried to another account. Sign out anyway?`))return;try{await api('/api/auth/logout',{method:'POST'})}catch{}signOut()};
  const boot=useWorkspaceBoot({
   enabled:phase==='checking',
   onUser:u=>{cachedUser.current=u;try{localStorage.setItem('clearpath_user',JSON.stringify(u))}catch{}setUser(u);setPhase('signed_in')},
@@ -170,5 +174,5 @@ export default function App(){
   return <ConnectingScreen phase={boot.phase} attempt={boot.attempt} elapsedMs={boot.elapsed} waitMs={boot.waitMs} online={boot.online} onRetry={boot.retryNow} onOpenOffline={canOffline?()=>{setUser(cached);setOfflineMode(true)}:null}/>;
  }
  if(!user||!localStorage.getItem('clearpath_token'))return <Login onLogin={u=>{cachedUser.current=u;setUser(u);setPhase('signed_in')}}/>;
- return <AuthenticatedApp user={user} onLogout={async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}signOut()}}/>;
+ return <AuthenticatedApp user={user} onLogout={logout}/>;
 }
