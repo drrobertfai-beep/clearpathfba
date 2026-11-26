@@ -9,13 +9,14 @@ import { buildProgressReport, parsePeriod } from './reporting.js';
 import { buildBip, buildCrisisPlan, buildDataSheet } from './documents.js';
 import { docxForReport, docxForBip, docxForCrisis, docxForDataSheet, docxForProgressReport, pack } from './docx-export.js';
 import { deidentify } from './deidentify.js';
-import { ensureLetterhead } from './letterhead.js';
+import { ensureLetterhead, buildLetterhead } from './letterhead.js';
+import { validateOrgSettings, changedOrgFields } from './org-settings.js';
 import { pdfForReport, pdfForBip, pdfForCrisis, pdfForDataSheet, pdfForProgressReport } from './pdf-export.js';
 import { assessmentExport, csvExport, importCsv } from './portability.js';
 import { mapClientToPatient, mapAssessmentToResources, bundleResources } from './fhir.js';
 import { logAudit, DOCUMENT_TYPE_LABELS, SIGNATORY_ROLE_LABELS, SIGN_OFF_STATUS_LABELS } from './audit.js';
 import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth, requireRole, ROLES, publicUser } from './auth.js';
-import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, listAuditLogInOrg, orgIdForWrite, orgIdForAssessment } from './org.js';
+import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, listAuditLogInOrg, orgIdForWrite, orgIdForAssessment, isPlatformAdmin, findOrgForUser, listOrgsForUser, listOrgMembers } from './org.js';
 import { ensureOrg, DEFAULT_ORG } from './org-migration.js';
 import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
 import { generateSecret, otpauthUri, verifyTOTP, generateBackupCodes, hashBackupCode, issueMfaToken, verifyMfaToken } from './mfa.js';
@@ -590,6 +591,59 @@ app.get('/api/admin/audit-log', requireRole('admin'), ah(async (req, res) => {
   try { details = JSON.parse(r.details || '{}'); } catch {}
   return { ...r, details };
  }));
+}));
+// --- Organization settings (pass 2) ----------------------------------------
+// The practice's own letterhead — the name, address and contact details printed
+// on every generated document — plus the people in the organization.
+//
+// Scope: an organization's own admin edits their own organization and nothing
+// else; the platform admin may pick which organization to edit. Any other
+// organization id answers 404 (never 403), exactly like every other scoped
+// record (see org.js), so ids cannot be probed. Every write is audited, and a
+// save that changes nothing writes neither a row nor an audit entry.
+const canEditOrg = (user) => isPlatformAdmin(user) || (user && user.role === 'admin');
+const orgEditor = (req, res, next) => (canEditOrg(req.user)
+ ? next()
+ : res.status(403).json({ error: 'Insufficient permissions.' }));
+const orgView = async (org, user) => ({
+ organization: { ...org, letterhead: buildLetterhead(org) },
+ can_edit: canEditOrg(user),
+ // The member list is the admin's; a read-only viewer gets none of it.
+ users: canEditOrg(user) ? await listOrgMembers(org.id) : [],
+});
+app.get('/api/organization', ah(async (req, res) => {
+ const requested = req.query.org_id == null || req.query.org_id === '' ? req.user.org_id : Number(req.query.org_id);
+ const org = await findOrgForUser(req.user, requested);
+ if (!org) return res.status(404).json({ error: 'Organization not found.' });
+ const orgs = await listOrgsForUser(req.user);
+ res.json({
+  ...(await orgView(org, req.user)),
+  organizations: orgs.map((o) => ({ id: Number(o.id), name: o.name, slug: o.slug })),
+ });
+}));
+app.put('/api/organization/:id', orgEditor, ah(async (req, res) => {
+ const org = await findOrgForUser(req.user, req.params.id);
+ if (!org) return res.status(404).json({ error: 'Organization not found.' });
+ const { error, values } = validateOrgSettings(req.body);
+ if (error) return res.status(400).json({ error });
+ const changed = changedOrgFields(org, values);
+ const fields = Object.keys(changed);
+ if (fields.length) {
+  await db.prepare(`UPDATE organizations SET ${fields.map((f) => `${f}=?`).join(', ')} WHERE id=?`)
+   .run(...fields.map((f) => values[f]), org.id);
+  await logAudit(db, { assessment_id: null, actor: auditActor(req), action: 'organization_settings_updated', details: {
+   label: `Organization settings updated: ${values.name}`,
+   entity: 'organization',
+   id: Number(org.id),
+   // Attribution: audit.js honours this for entries that name no client.
+   organization_id: Number(org.id),
+   slug: org.slug,
+   changed,
+  } });
+ }
+ // Read back so the response is the stored truth, not the intent.
+ const saved = await findOrgForUser(req.user, org.id);
+ res.json({ ...(await orgView(saved || org, req.user)), changed: fields });
 }));
 // --- Subscription billing (Stripe, TEST MODE for this milestone) ---
 // Admin-only surface; the client never sees a Stripe key. The webhook is the
