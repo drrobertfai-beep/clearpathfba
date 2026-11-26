@@ -35,7 +35,7 @@ const { app, bootstrap } = await import('../src/index.js');
 const db = (await import('../src/db.js')).default;
 const { hashPassword } = await import('../src/auth.js');
 const {
-  runOrgMigration, relocateDemoWorkspace, ensureOrg, backfillOrganizations,
+  runOrgMigration, relocateDemoWorkspace, ensureOrg, backfillOrganizations, backfillAuditLogOrgs,
   DEFAULT_ORG, DEMO_ORG, DEMO_USERNAME, ORG_MIGRATION_ID, PLATFORM_ADMIN_ACCOUNTS,
 } = await import('../src/org-migration.js');
 const { seedDemo } = await import('../scripts/seed-demo.mjs');
@@ -43,7 +43,7 @@ const { seedDemo } = await import('../scripts/seed-demo.mjs');
 let server;
 let baseUrl;
 const fx = {}; // fixture: orgs, users, tokens, records
-const created = { clients: [], assessments: [], behaviors: [], dataPoints: [] };
+const created = { clients: [], assessments: [], behaviors: [], dataPoints: [], subscriptions: [], auditFloor: 0 };
 
 // --- fixture helpers -------------------------------------------------------
 async function mkOrg(slug, name) {
@@ -120,6 +120,9 @@ const row = async (table, id) => await db.prepare(`SELECT * FROM ${table} WHERE 
 // --- fixture ---------------------------------------------------------------
 before(async () => {
   await bootstrap(); // schema + organization migration + seed accounts
+  // Everything the audit trail records from here on is this test's own doing;
+  // after() removes it (it matters on a shared Postgres database).
+  created.auditFloor = (await db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM audit_log').get()).id;
   await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 
@@ -158,6 +161,8 @@ after(async () => {
   for (const id of created.behaviors) { try { await db.prepare('DELETE FROM target_behaviors WHERE id=?').run(id); } catch { /* gone */ } }
   for (const id of created.assessments) { try { await db.prepare('DELETE FROM assessments WHERE id=?').run(id); } catch { /* gone */ } }
   for (const id of created.clients) { try { await db.prepare('DELETE FROM clients WHERE id=?').run(id); } catch { /* gone */ } }
+  for (const id of created.subscriptions) { try { await db.prepare('DELETE FROM subscriptions WHERE id=?').run(id); } catch { /* gone */ } }
+  if (created.auditFloor) { try { await db.prepare('DELETE FROM audit_log WHERE id > ?').run(created.auditFloor); } catch { /* gone */ } }
   server?.close();
 });
 
@@ -567,4 +572,141 @@ test('the demo organization is separate from the default organization', async ()
     'SELECT COUNT(*) AS n FROM clients WHERE org_id=? AND (notes IS NULL OR notes NOT LIKE ?)',
   ).get(demoOrg.id, 'SAMPLE DATA%');
   assert.equal(realInDemo.n, 0, 'no non-sample client was moved into the demo organization');
+});
+
+// ---------------------------------------------------------------------------
+// 6. pass 2 — the audit feed, exports, FHIR and billing are per organization
+// ---------------------------------------------------------------------------
+// Postgres hands JSONB back parsed or as text depending on the adapter; accept
+// both so these assertions describe the app, not the driver.
+const parseDetails = (value) => {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value || '{}'); } catch { return {}; }
+};
+
+test('pass 2: the admin audit feed is confined to the caller organization', async () => {
+  // One client-level entry per organization, written through the API so the real
+  // path (logAudit → resolveAuditOrg) is what is exercised.
+  const madeA = await api(fx.tokenA, 'POST', '/api/clients', { first_name: 'Auditfeed', last_name: 'Alpha', consent_status: 'obtained' });
+  assert.equal(madeA.status, 201);
+  created.clients.push(madeA.json.id);
+  const madeB = await api(fx.tokenB, 'POST', '/api/clients', { first_name: 'Auditfeed', last_name: 'Bravo', consent_status: 'obtained' });
+  assert.equal(madeB.status, 201);
+  created.clients.push(madeB.json.id);
+
+  // The write itself attributed each entry to the client's organization.
+  const clientCreated = await db.prepare("SELECT * FROM audit_log WHERE action='client_created' ORDER BY id").all();
+  const entryFor = (clientId) => clientCreated.find((r) => parseDetails(r.details).id === clientId);
+  assert.ok(entryFor(madeA.json.id), 'org A client_created entry exists');
+  assert.equal(Number(entryFor(madeA.json.id).org_id), fx.orgA.id, 'org A entry attributed to org A');
+  assert.ok(entryFor(madeB.json.id), 'org B client_created entry exists');
+  assert.equal(Number(entryFor(madeB.json.id).org_id), fx.orgB.id, 'org B entry attributed to org B');
+
+  // An organization's own admin sees its own history and nothing else.
+  const feedA = await api(fx.tokenAdminA, 'GET', '/api/admin/audit-log?limit=500');
+  assert.equal(feedA.status, 200);
+  assert.ok(feedA.json.length > 0, 'the org admin still sees its own history');
+  for (const r of feedA.json) assert.equal(Number(r.org_id), fx.orgA.id, `row ${r.id} (${r.action}) belongs to org A`);
+  assert.ok(feedA.json.some((r) => parseDetails(r.details).id === madeA.json.id), 'own client event is present');
+  assert.ok(!feedA.json.some((r) => parseDetails(r.details).id === madeB.json.id), "the other organization's client event is absent");
+  assert.ok(!feedA.json.some((r) => r.action === 'client_created' && parseDetails(r.details).label === 'Client created: Auditfeed Bravo'), 'no other-org label leaks');
+
+  // ...and the same request from the other organization returns none of org A's.
+  await mkUser('admin.b@org-b.test', fx.orgB.id, 'admin');
+  const tokenAdminB = await login('admin.b@org-b.test');
+  const feedB = await api(tokenAdminB, 'GET', '/api/admin/audit-log?limit=500');
+  assert.equal(feedB.status, 200);
+  for (const r of feedB.json) assert.equal(Number(r.org_id), fx.orgB.id, `row ${r.id} (${r.action}) belongs to org B`);
+  assert.ok(!feedB.json.some((r) => parseDetails(r.details).id === madeA.json.id), "org A's client event is absent from org B's feed");
+  assert.ok(feedB.json.some((r) => parseDetails(r.details).id === madeB.json.id), 'org B sees its own client event');
+
+  // The platform admin still sees every organization.
+  const feedOwner = await api(fx.tokenOwner, 'GET', '/api/admin/audit-log?limit=500');
+  assert.equal(feedOwner.status, 200);
+  const ownerOrgs = new Set(feedOwner.json.map((r) => (r.org_id == null ? null : Number(r.org_id))));
+  assert.ok(ownerOrgs.has(fx.orgA.id), 'platform admin sees org A');
+  assert.ok(ownerOrgs.has(fx.orgB.id), 'platform admin sees org B');
+  assert.ok(feedOwner.json.some((r) => parseDetails(r.details).id === madeB.json.id));
+});
+
+test('pass 2: unattributed entries are platform-admin-only and legacy rows are attributed on boot', async () => {
+  // A row with no organization at all (a Stripe webhook arrives without a
+  // signed-in user). It must not reach any organization's feed.
+  const orphan = await db.prepare(
+    "INSERT INTO audit_log (org_id, assessment_id, actor, action, details) VALUES (NULL, NULL, 'stripe', 'stripe_webhook', '{}')",
+  ).run();
+  const feedA = await api(fx.tokenAdminA, 'GET', '/api/admin/audit-log?limit=500');
+  assert.ok(!feedA.json.some((r) => r.id === Number(orphan.lastInsertRowid)), 'unattributed row is not in an org feed');
+  const feedOwner = await api(fx.tokenOwner, 'GET', '/api/admin/audit-log?limit=500');
+  assert.ok(feedOwner.json.some((r) => r.id === Number(orphan.lastInsertRowid)), 'platform admin still sees it');
+
+  // Legacy rows (written before audit_log carried org_id): the boot backfill
+  // attributes them from the assessment, or from the actor's account, and leaves
+  // what it cannot attribute alone.
+  const legacyAssessment = await db.prepare(
+    "INSERT INTO audit_log (org_id, assessment_id, actor, action, details) VALUES (NULL, ?, ?, 'data_point_created', '{}')",
+  ).run(fx.assessB.id, 'clinician.b@org-b.test');
+  const legacyActor = await db.prepare(
+    "INSERT INTO audit_log (org_id, assessment_id, actor, action, details) VALUES (NULL, NULL, ?, 'password_changed', '{}')",
+  ).run('clinician.b@org-b.test');
+  const result = await backfillAuditLogOrgs(db);
+  assert.ok(result.attributed >= 2, 'the backfill attributed the legacy rows');
+  assert.equal(Number((await row('audit_log', legacyAssessment.lastInsertRowid)).org_id), fx.orgB.id, 'assessment row attributed through its client');
+  assert.equal(Number((await row('audit_log', legacyActor.lastInsertRowid)).org_id), fx.orgB.id, 'account row attributed through the actor');
+  assert.equal((await row('audit_log', orphan.lastInsertRowid)).org_id, null, 'unattributable rows stay platform-admin-only');
+});
+
+test('pass 2: export and FHIR routes return nothing across organizations', async () => {
+  for (const p of [
+    `/api/assessments/${fx.assessB.id}/export.csv`,
+    `/api/assessments/${fx.assessB.id}/export.json`,
+    `/api/assessments/${fx.assessB.id}/export.fhir`,
+    `/api/clients/${fx.clientB.id}/export.fhir`,
+    `/api/assessments/${fx.assessB.id}/export.csv?deidentified=true`,
+    `/api/assessments/${fx.assessB.id}/export.json?deidentified=true`,
+    `/api/assessments/${fx.assessB.id}/export.fhir?deidentified=true`,
+    `/api/clients/${fx.clientB.id}/export.fhir?deidentified=true`,
+  ]) {
+    const res = await api(fx.tokenA, 'GET', p);
+    assert.equal(res.status, 404, `${p} is 404 for another organization`);
+    const body = typeof res.json === 'string' ? res.json : JSON.stringify(res.json);
+    assert.ok(!body.includes('Bravo'), `${p} leaks nothing about the other organization's client`);
+  }
+
+  // The owning organization can still export its own records.
+  assert.equal((await api(fx.tokenB, 'GET', `/api/assessments/${fx.assessB.id}/export.csv`)).status, 200);
+  assert.equal((await api(fx.tokenB, 'GET', `/api/assessments/${fx.assessB.id}/export.json`)).status, 200);
+  assert.equal((await api(fx.tokenB, 'GET', `/api/assessments/${fx.assessB.id}/export.fhir`)).status, 200);
+  assert.equal((await api(fx.tokenB, 'GET', `/api/clients/${fx.clientB.id}/export.fhir`)).status, 200);
+});
+
+test('pass 2: billing status is the caller account only, and billing events stay in their organization', async () => {
+  const subA = await db.prepare(
+    "INSERT INTO subscriptions (user_id,customer_id,subscription_id,plan_key,plan_label,quantity,status) VALUES (?,?,?,?,?,1,'active')",
+  ).run(fx.adminA.id, 'cus_orgA', 'sub_orgA', 'solo', 'Solo');
+  created.subscriptions.push(subA.lastInsertRowid);
+  const subB = await db.prepare(
+    "INSERT INTO subscriptions (user_id,customer_id,subscription_id,plan_key,plan_label,quantity,status) VALUES (?,?,?,?,?,1,'active')",
+  ).run(fx.userB.id, 'cus_orgB', 'sub_orgB', 'practice', 'Practice');
+  created.subscriptions.push(subB.lastInsertRowid);
+
+  const mine = await api(fx.tokenAdminA, 'GET', '/api/billing/status');
+  assert.equal(mine.status, 200);
+  assert.equal(mine.json.subscription_id, 'sub_orgA', "the org admin's status is its own account's subscription");
+  assert.notEqual(mine.json.subscription_id, 'sub_orgB', "never the other organization's subscription");
+  // The platform admin's own status is likewise only its own account's.
+  const owner = await api(fx.tokenOwner, 'GET', '/api/billing/status');
+  assert.equal(owner.status, 200);
+  assert.ok(owner.json === null || owner.json.subscription_id !== 'sub_orgA');
+
+  // A billing event raised by an org B account (attributed from the actor) does
+  // not appear in org A's audit feed.
+  const billB = await db.prepare(
+    "INSERT INTO audit_log (org_id, assessment_id, actor, action, details) VALUES (NULL, NULL, ?, 'billing_checkout_started', '{}')",
+  ).run(fx.userB.username);
+  await backfillAuditLogOrgs(db);
+  const feedA = await api(fx.tokenAdminA, 'GET', '/api/admin/audit-log?limit=500');
+  assert.ok(!feedA.json.some((r) => r.id === Number(billB.lastInsertRowid)), "another organization's billing event is absent");
+  const feedOwner = await api(fx.tokenOwner, 'GET', '/api/admin/audit-log?limit=500');
+  assert.ok(feedOwner.json.some((r) => r.id === Number(billB.lastInsertRowid)), 'the platform admin still sees it');
 });

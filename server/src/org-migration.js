@@ -28,9 +28,17 @@
 //
 // The module takes the data layer as a parameter instead of importing db.js so
 // db.js can call it without a circular import.
+import { resolveAuditOrg } from './audit.js';
 
 /** Marker row recorded in schema_migrations once the one-time move has run. */
 export const ORG_MIGRATION_ID = '001_organizations';
+
+/**
+ * Marker for the one-time attribution of audit entries written before
+ * audit_log carried an org_id (pass 2). Separate marker because the rows can
+ * only be attributed once the users/clients backfill above has run.
+ */
+export const AUDIT_ORG_MIGRATION_ID = '002_audit_log_orgs';
 
 export const DEFAULT_ORG = { name: 'ClearPathFBA', slug: 'default' };
 export const DEMO_ORG = { name: 'ClearPathFBA Demo (Sample Data)', slug: 'demo' };
@@ -92,6 +100,40 @@ export async function backfillOrganizations(database) {
 }
 
 /**
+ * One-time attribution of audit entries written before audit_log carried an
+ * org_id (organization scoping pass 2).
+ *
+ * Rows are attributed with the same rules logAudit uses on every new write
+ * (resolveAuditOrg: the assessment, then details.entity/id, then the actor's
+ * account). Anything that matches nothing — a Stripe webhook, or an entry whose
+ * record has since been deleted — keeps a NULL org_id, which means "platform
+ * admin only" rather than "everyone". Filling the column is what stops the
+ * admin audit feed handing one practice's history to another practice.
+ *
+ * @param {{prepare: Function}} database data layer
+ * @returns {Promise<{scanned: number, attributed: number}>}
+ */
+export async function backfillAuditLogOrgs(database) {
+  const pending = await database.prepare(
+    'SELECT id, assessment_id, actor, details FROM audit_log WHERE org_id IS NULL ORDER BY id',
+  ).all();
+  let attributed = 0;
+  for (const entry of pending) {
+    const orgId = await resolveAuditOrg(database, {
+      assessment_id: entry.assessment_id,
+      actor: entry.actor,
+      // Postgres hands JSONB back as text through this adapter, SQLite stores
+      // text too; resolveAuditOrg parses either.
+      details: entry.details,
+    });
+    if (!orgId) continue;
+    await database.prepare('UPDATE audit_log SET org_id=? WHERE id=?').run(orgId, entry.id);
+    attributed += 1;
+  }
+  return { scanned: pending.length, attributed };
+}
+
+/**
  * Move the demo workspace into its own organization: the demo user plus every
  * client whose dbhds_flags carry `demo: true` (the marker the demo seed
  * writes). Everything else — including any real client record — stays in the
@@ -131,7 +173,13 @@ export async function runOrgMigration(database) {
   const defaultOrg = await backfillOrganizations(database);
   const demoOrg = await ensureOrg(database, DEMO_ORG);
   const applied = await database.prepare('SELECT id FROM schema_migrations WHERE id=?').get(ORG_MIGRATION_ID);
-  if (applied) return { defaultOrg, demoOrg, movedClientIds: [], alreadyApplied: true };
+  if (applied) {
+    // Pass 2: attribute audit entries written before audit_log had an org_id.
+    // Runs after the demo move below on a first boot, and on its own on every
+    // boot after that (it is marker-guarded, so at most once either way).
+    await attributeExistingAuditLog(database);
+    return { defaultOrg, demoOrg, movedClientIds: [], alreadyApplied: true };
+  }
   const { clientIds } = await relocateDemoWorkspace(database);
   try {
     // Same reasoning as ensureOrg: a lost race is not an error. The marker is
@@ -142,5 +190,26 @@ export async function runOrgMigration(database) {
     // Two instances booting at once: the other one recorded the marker.
     if (!isUnique(err)) throw err;
   }
+  await attributeExistingAuditLog(database);
   return { defaultOrg, demoOrg, movedClientIds: clientIds, alreadyApplied: false };
+}
+
+/**
+ * Marker-guarded wrapper around backfillAuditLogOrgs: the attribution runs at
+ * most once per database, so a boot does not rescan every unattributable entry
+ * (Stripe webhooks, entries whose record was deleted) forever.
+ * @returns {Promise<{scanned: number, attributed: number}|null>} null when the
+ *   attribution had already been recorded
+ */
+async function attributeExistingAuditLog(database) {
+  const done = await database.prepare('SELECT id FROM schema_migrations WHERE id=?').get(AUDIT_ORG_MIGRATION_ID);
+  if (done) return null;
+  const result = await backfillAuditLogOrgs(database);
+  try {
+    // Same lost-race reasoning as the markers above: the other boot did it.
+    await database.prepare('INSERT INTO schema_migrations (id) VALUES (?) ON CONFLICT(id) DO NOTHING').run(AUDIT_ORG_MIGRATION_ID);
+  } catch (err) {
+    if (!isUnique(err)) throw err;
+  }
+  return result;
 }

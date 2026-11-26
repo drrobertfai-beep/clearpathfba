@@ -15,7 +15,7 @@ import { assessmentExport, csvExport, importCsv } from './portability.js';
 import { mapClientToPatient, mapAssessmentToResources, bundleResources } from './fhir.js';
 import { logAudit, DOCUMENT_TYPE_LABELS, SIGNATORY_ROLE_LABELS, SIGN_OFF_STATUS_LABELS } from './audit.js';
 import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth, requireRole, ROLES, publicUser } from './auth.js';
-import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, orgIdForWrite } from './org.js';
+import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, listAuditLogInOrg, orgIdForWrite } from './org.js';
 import { ensureOrg, DEFAULT_ORG } from './org-migration.js';
 import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
 import { generateSecret, otpauthUri, verifyTOTP, generateBackupCodes, hashBackupCode, issueMfaToken, verifyMfaToken } from './mfa.js';
@@ -568,12 +568,19 @@ app.get('/api/assessments/:id/audit-log', ah(async (req, res) => {
   return { ...r, details };
  }));
 }));
-// Global audit feed (admin only) — every recorded action across all clients and
-// assessments, newest first, for supervision. Includes client-level events
-// (assessment_id null) that the per-assessment endpoint cannot surface.
+// Audit feed (admin only) — every recorded action for supervision, newest
+// first. Includes client-level events (assessment_id null) that the
+// per-assessment endpoint cannot surface.
+//
+// Organization scoping (pass 2): an organization's own admin sees only their
+// organization's entries; the platform admin still sees every organization.
+// This used to return the whole table to any admin, which handed one practice's
+// client names, sign-off activity and billing events to another practice's
+// admin. Attribution is stored on the row (audit_log.org_id) by logAudit, so the
+// scope is one predicate (see listAuditLogInOrg in org.js).
 app.get('/api/admin/audit-log', requireRole('admin'), ah(async (req, res) => {
  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
- const rows = await db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(limit);
+ const rows = await listAuditLogInOrg(req.user, limit);
  res.json(rows.map((r) => {
   let details = {};
   try { details = JSON.parse(r.details || '{}'); } catch {}
