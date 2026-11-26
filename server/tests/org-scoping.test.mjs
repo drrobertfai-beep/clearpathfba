@@ -39,6 +39,8 @@ const {
   DEFAULT_ORG, DEMO_ORG, DEMO_USERNAME, ORG_MIGRATION_ID, PLATFORM_ADMIN_ACCOUNTS,
 } = await import('../src/org-migration.js');
 const { seedDemo } = await import('../scripts/seed-demo.mjs');
+const { signDocument } = await import('../src/signature.js');
+const { buildReport } = await import('../src/report.js');
 
 let server;
 let baseUrl;
@@ -709,4 +711,62 @@ test('pass 2: billing status is the caller account only, and billing events stay
   assert.ok(!feedA.json.some((r) => r.id === Number(billB.lastInsertRowid)), "another organization's billing event is absent");
   const feedOwner = await api(fx.tokenOwner, 'GET', '/api/admin/audit-log?limit=500');
   assert.ok(feedOwner.json.some((r) => r.id === Number(billB.lastInsertRowid)), 'the platform admin still sees it');
+});
+
+// ---------------------------------------------------------------------------
+// Pass 2: per-organization signing keys
+// ---------------------------------------------------------------------------
+test('pass 2: each organization signs with its own key, and every signature still verifies publicly', async () => {
+  const signOne = async (token, assessmentId) => {
+    const created = await api(token, 'POST', `/api/assessments/${assessmentId}/sign-offs`, {
+      document_type: 'fba_report', signatory_role: 'bcba', signatory_name: 'Signing Clinician',
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const signed = await api(token, 'POST', `/api/sign-offs/${created.json.id}/sign`, { signature: 'Signing Clinician' });
+    assert.equal(signed.status, 200, JSON.stringify(signed.json));
+    return signed.json;
+  };
+  const soA = await signOne(fx.tokenA, fx.assessA.id);
+  const soB = await signOne(fx.tokenB, fx.assessB.id);
+  assert.ok(soA.signature_key_fingerprint && soB.signature_key_fingerprint);
+  assert.notEqual(soA.signature_key_fingerprint, soB.signature_key_fingerprint,
+    'two practices sign with two different keys');
+
+  // The key recorded on each signature belongs to the organization that owns
+  // the client — not to whoever happened to be signed in.
+  for (const [so, org] of [[soA, fx.orgA], [soB, fx.orgB]]) {
+    const keyRow = await db.prepare('SELECT org_id FROM signing_keys WHERE fingerprint=?').get(so.signature_key_fingerprint);
+    assert.ok(keyRow, 'the signing key is on file');
+    assert.equal(Number(keyRow.org_id), Number(org.id), 'the signature names the client\'s organization');
+  }
+
+  // Unauthenticated (public) verification still passes for both practices.
+  for (const so of [soA, soB]) {
+    const res = await fetch(`${baseUrl}/api/verify/sign-off/${so.id}`);
+    assert.equal(res.status, 200);
+    const v = await res.json();
+    assert.equal(v.valid, true);
+    assert.equal(v.tampered, false);
+    assert.equal(v.key_fingerprint, so.signature_key_fingerprint);
+  }
+
+  // A document signed BEFORE per-org keys (the legacy key, org_id NULL) keeps
+  // verifying through the same public endpoint, and is not reported tampered.
+  const legacy = await signDocument(await buildReport(fx.assessA.id), 'fba_report'); // no org = legacy key
+  const legacyKeyRow = await db.prepare('SELECT * FROM signing_keys WHERE fingerprint=?').get(legacy.fingerprint);
+  assert.ok(legacyKeyRow, 'the legacy key row exists');
+  assert.equal(legacyKeyRow.org_id, null, 'the legacy key belongs to no organization');
+  const legacySo = await db.prepare(
+    "INSERT INTO sign_offs (assessment_id,document_type,signatory_role,signatory_name,status,signature,signed_at,signature_algo,signature_digest,signature_key_fingerprint,signature_typed) VALUES (?,'fba_report','supervisor','Legacy Signer','signed',?,?,'Ed25519',?,?,'Legacy Signer')",
+  ).run(fx.assessA.id, legacy.signature, new Date().toISOString(), legacy.digest, legacy.fingerprint);
+  const legacyVerify = await (await fetch(`${baseUrl}/api/verify/sign-off/${legacySo.lastInsertRowid}`)).json();
+  assert.equal(legacyVerify.valid, true, 'a legacy-key signature still verifies publicly');
+  assert.equal(legacyVerify.tampered, false);
+  assert.equal(legacyVerify.key_fingerprint, legacy.fingerprint);
+  assert.ok(await db.prepare('SELECT 1 AS ok FROM signing_keys WHERE fingerprint=?').get(legacy.fingerprint),
+    'the legacy key row survives per-org signing');
+
+  for (const id of [soA.id, soB.id, Number(legacySo.lastInsertRowid)]) {
+    await db.prepare('DELETE FROM sign_offs WHERE id=?').run(id);
+  }
 });

@@ -33,6 +33,7 @@ import { DEMO_ORG as DEMO_ORG_ROW, DEMO_USERNAME, ensureOrg } from '../src/org-m
 import { analyzeAssessment } from '../src/analysis.js';
 import { buildReport } from '../src/report.js';
 import { signDocument, verifyDocument } from '../src/signature.js';
+import { orgIdForAssessment } from '../src/org.js';
 import { buildProgressReport } from '../src/reporting.js';
 import { logAudit } from '../src/audit.js';
 
@@ -407,9 +408,10 @@ async function ensureSignOff(assessment, documentType, role, name, sign) {
     return row;
   }
   // Sign exactly what the export builders produce, via the app's own Ed25519
-  // signer — the same digest path the /sign endpoint uses.
+  // signer — the same digest path the /sign endpoint uses, including the
+  // signing key of the organization the client belongs to.
   const payload = await buildReport(assessment.id);
-  const { digest, signature, fingerprint } = await signDocument(payload, documentType);
+  const { digest, signature, fingerprint } = await signDocument(payload, documentType, await orgIdForAssessment(assessment.id));
   const signedAt = new Date().toISOString();
   await db.prepare(
     "UPDATE sign_offs SET status='signed', signature=?, signature_algo=?, signature_digest=?, signature_key_fingerprint=?, signature_typed=?, signed_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?"

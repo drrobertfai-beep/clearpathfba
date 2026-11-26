@@ -15,7 +15,7 @@ import { assessmentExport, csvExport, importCsv } from './portability.js';
 import { mapClientToPatient, mapAssessmentToResources, bundleResources } from './fhir.js';
 import { logAudit, DOCUMENT_TYPE_LABELS, SIGNATORY_ROLE_LABELS, SIGN_OFF_STATUS_LABELS } from './audit.js';
 import { hashPassword, verifyPassword, issueSession, getSessionUser, requireAuth, requireRole, ROLES, publicUser } from './auth.js';
-import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, listAuditLogInOrg, orgIdForWrite } from './org.js';
+import { listClientsInOrg, findClientInOrg, findAssessmentInOrg, findTargetBehaviorInOrg, findDataPointInOrg, findHypothesisInOrg, findSignOffInOrg, findProgressReportInOrg, listUsersInOrg, findUserInOrg, listAuditLogInOrg, orgIdForWrite, orgIdForAssessment } from './org.js';
 import { ensureOrg, DEFAULT_ORG } from './org-migration.js';
 import { signDocument, verifyDocument, SIGNATURE_ALGO } from './signature.js';
 import { generateSecret, otpauthUri, verifyTOTP, generateBackupCodes, hashBackupCode, issueMfaToken, verifyMfaToken } from './mfa.js';
@@ -479,11 +479,15 @@ app.post('/api/sign-offs/:id/sign', ah(async (req, res) => {
  if (sig.length > 500) return res.status(400).json({ error: 'signature must be 500 characters or fewer.' });
  // Formal e-signature: digest + sign the exact payload the export builders
  // produce for this assessment/document_type, so the signature covers what is
- // actually exported (report/bip/crisis-plan).
+ // actually exported (report/bip/crisis-plan). The signing key is the one of
+ // the organization the CLIENT belongs to (pass 2), so a signature identifies
+ // the practice that made it; documents signed before per-org keys keep
+ // verifying under the legacy key recorded on their own row.
  const build = DOC_BUILDERS[row.document_type];
  const payload = build ? await build(row.assessment_id) : null;
  if (!payload) return res.status(404).json({ error: 'Assessment not found.' });
- const { digest, signature: sigB64, fingerprint } = await signDocument(payload, row.document_type);
+ const orgId = await orgIdForAssessment(row.assessment_id);
+ const { digest, signature: sigB64, fingerprint } = await signDocument(payload, row.document_type, orgId);
  const signedAt = new Date().toISOString();
  // `signature` stores the base64 Ed25519 signature bytes (verifiable later);
  // `signature_typed` keeps the human-readable typed-name signature.
