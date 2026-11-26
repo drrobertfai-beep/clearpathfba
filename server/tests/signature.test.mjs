@@ -11,8 +11,18 @@ process.env.DATABASE_PATH = path.join(mkdtempSync(path.join(tmpdir(), 'cpf-sig-d
 process.env.SIGNING_KEYS_DIR = mkdtempSync(path.join(tmpdir(), 'cpf-sig-keys-'));
 process.env.SIGNING_KEY_FILE = path.join(process.env.SIGNING_KEYS_DIR, 'signing.pem');
 
-const { ensureSigningKey, keyInfo, signDocument, verifyDocument, digestFor, canonicalStringify, fingerprintForPublicKey, SIGNATURE_ALGO } = await import('../src/signature.js');
+const { ensureSigningKey, keyInfo, signDocument, verifyDocument, digestFor, signDigest, canonicalStringify, fingerprintForPublicKey, SIGNATURE_ALGO } = await import('../src/signature.js');
 const db = (await import('../src/db.js')).default;
+import crypto from 'node:crypto';
+
+/** A fresh organization to hang a signing key on. */
+let orgSeq = 0;
+async function mkOrg() {
+ const slug = `sig-test-org-${Date.now()}-${++orgSeq}`;
+ const r = await db.prepare("INSERT INTO organizations (name, slug) VALUES (?, ?)").run(`Signing test ${slug}`, slug);
+ return Number(r.lastInsertRowid);
+}
+const keyRow = async (fingerprint) => await db.prepare('SELECT * FROM signing_keys WHERE fingerprint=?').get(fingerprint);
 
 // A representative report-style payload (like buildReport produces), with the
 // volatile fields the digest layer is expected to normalize away.
@@ -123,4 +133,111 @@ test('key file is persisted with 0600 perms and private key never exposed', () =
  const mode = statSync(process.env.SIGNING_KEY_FILE).mode & 0o777;
  assert.equal(mode, 0o600);
  assert.equal(SIGNATURE_ALGO, 'Ed25519');
+});
+
+// ---------------------------------------------------------------------------
+// Per-organization keys (pass 2)
+// ---------------------------------------------------------------------------
+
+test('per-org keys: each organization signs with its own key, never another org\'s', async () => {
+ const orgA = await mkOrg();
+ const orgB = await mkOrg();
+ const keyA = await ensureSigningKey(orgA);
+ const keyB = await ensureSigningKey(orgB);
+ assert.notEqual(keyA.fingerprint, keyB.fingerprint, 'two organizations have two different keys');
+
+ const signedA = await signDocument(samplePayload(), 'fba_report', orgA);
+ const signedB = await signDocument(samplePayload(), 'fba_report', orgB);
+ assert.equal(signedA.fingerprint, keyA.fingerprint, 'org A signs with org A\'s key');
+ assert.equal(signedB.fingerprint, keyB.fingerprint, 'org B signs with org B\'s key');
+ assert.notEqual(signedA.signature, signedB.signature);
+
+ // Each key row records the organization it belongs to…
+ assert.equal(Number((await keyRow(signedA.fingerprint)).org_id), orgA);
+ assert.equal(Number((await keyRow(signedB.fingerprint)).org_id), orgB);
+
+ // …and each signature verifies against its own organization's document.
+ for (const [signed, orgId] of [[signedA, orgA], [signedB, orgB]]) {
+  const v = await verifyDocument(samplePayload(), 'fba_report', signed);
+  assert.equal(v.valid, true);
+  assert.equal(v.tampered, false);
+  assert.equal(v.sig_valid, true);
+  assert.equal((await ensureSigningKey(orgId)).fingerprint, signed.fingerprint, 'the key is reused, not regenerated');
+ }
+
+ // Private key material never leaves the module through keyInfo().
+ const info = await keyInfo(orgA);
+ assert.ok(!Object.keys(info).some((k) => k.toLowerCase().includes('private')));
+ assert.ok(!JSON.stringify(info).includes('PRIVATE KEY'));
+});
+
+test('per-org keys: the key survives losing the PEM file (it lives in the database)', async () => {
+ const orgId = await mkOrg();
+ const key = await ensureSigningKey(orgId);
+ const file = path.join(process.env.SIGNING_KEYS_DIR, `org-${orgId}.pem`);
+ assert.match(readFileSync(file, 'utf8'), /^-----BEGIN PRIVATE KEY-----/);
+ assert.equal(statSync(file).mode & 0o777, 0o600, 'the per-org key file is 0600');
+ assert.ok((await keyRow(key.fingerprint)).private_key_pem, 'the private key is stored on the key row');
+
+ // A different process with an empty disk (a serverless instance) signs with
+ // the SAME key, because the row — not the file — is the source of truth.
+ const other = await import('../src/signature.js?fresh=1');
+ const signed = await other.signDocument(samplePayload(), 'fba_report', orgId);
+ assert.equal(signed.fingerprint, key.fingerprint);
+ assert.equal((await verifyDocument(samplePayload(), 'fba_report', signed)).valid, true);
+});
+
+test('legacy key: a signature made before per-org keys keeps verifying, and its key row is never removed', async () => {
+ // Sign the way the pre-pass-2 code did: no organization.
+ const legacy = await signDocument(samplePayload(), 'fba_report');
+ const legacyRow = await keyRow(legacy.fingerprint);
+ assert.ok(legacyRow, 'the legacy key row exists');
+ assert.equal(legacyRow.org_id, null, 'the legacy key belongs to no organization');
+
+ // A practice now signs with its own key…
+ const orgId = await mkOrg();
+ const orgKey = await ensureSigningKey(orgId);
+ assert.notEqual(orgKey.fingerprint, legacy.fingerprint);
+ await signDocument(samplePayload(), 'fba_report', orgId);
+
+ // …and the old signature still verifies, unchanged and not tampered. This is
+ // the check the unauthenticated verification endpoint performs.
+ const v = await verifyDocument(samplePayload(), 'fba_report', legacy);
+ assert.equal(v.valid, true, 'the legacy signature is still valid');
+ assert.equal(v.tampered, false);
+ assert.equal(v.sig_valid, true);
+ const after = await keyRow(legacy.fingerprint);
+ assert.ok(after, 'the legacy key row was not deleted');
+ assert.equal(after.public_key_pem, legacyRow.public_key_pem, 'the legacy public key was not rewritten');
+
+ // Content edited after signing is still reported as tampered under the
+ // legacy key (the content check did not get weaker).
+ const edited = samplePayload();
+ edited.assessment.title = 'Edited after signing';
+ assert.equal((await verifyDocument(edited, 'fba_report', legacy)).tampered, true);
+});
+
+test('legacy key: a key row whose private material is gone is kept for verification, not replaced', async () => {
+ const orgId = await mkOrg();
+ // A row with a public key only — e.g. the private PEM was lost when an
+ // instance recycled its disk. Old signatures were made with this key.
+ const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+ const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+ const orphanFingerprint = fingerprintForPublicKey(publicKeyPem);
+ await db.prepare('INSERT INTO signing_keys (org_id, fingerprint, public_key_pem) VALUES (?, ?, ?)')
+  .run(orgId, orphanFingerprint, publicKeyPem);
+ const digest = digestFor(samplePayload(), 'fba_report');
+ const signature = signDigest(digest, privateKey);
+
+ // Signing again must mint a new key rather than deleting or rewriting the old
+ // row — deleting it is what would flip an old document to "invalid".
+ const current = await ensureSigningKey(orgId);
+ assert.notEqual(current.fingerprint, orphanFingerprint);
+ const orphan = await keyRow(orphanFingerprint);
+ assert.ok(orphan, 'the key an old signature was made with is still on file');
+ assert.equal(orphan.public_key_pem, publicKeyPem);
+
+ const v = await verifyDocument(samplePayload(), 'fba_report', { digest, signature, fingerprint: orphanFingerprint });
+ assert.equal(v.valid, true, 'the old signature still verifies against the kept public key');
+ assert.equal(v.tampered, false);
 });

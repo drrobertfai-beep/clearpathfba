@@ -128,6 +128,19 @@ export async function findHypothesisInOrg(id, user) {
  ).get(id, ...scope.params);
 }
 
+/**
+ * The organization a *document* belongs to, resolved from the client — used to
+ * pick the signing key. Deliberately not derived from the caller: a platform
+ * admin signing another practice's document must sign it with that practice's
+ * key, and the document belongs to the client's organization.
+ */
+export async function orgIdForAssessment(assessmentId) {
+ const row = await db.prepare(
+  'SELECT c.org_id FROM assessments a JOIN clients c ON c.id = a.client_id WHERE a.id=?',
+ ).get(assessmentId);
+ return row && row.org_id != null ? Number(row.org_id) : null;
+}
+
 /** One sign-off record, resolved through assessment → client → org. */
 export async function findSignOffInOrg(id, user) {
  const scope = orgPredicate(user, 'c.org_id');

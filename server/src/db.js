@@ -96,6 +96,16 @@ const migrations = {
   ['signature_key_fingerprint', 'TEXT'],
   ['signature_typed', 'TEXT'],
  ],
+ signing_keys: [
+  // Organization scoping (pass 2): each organization signs with its own key.
+  // NULL org_id is the single pre-scoping key that signed everything before
+  // this change; its row is kept forever so those signatures keep verifying.
+  ['org_id', 'INTEGER REFERENCES organizations(id)'],
+  // Private key material, so a key survives an instance whose disk does not
+  // (the API runs on serverless instances in production). Only ever read by
+  // signature.js; no API response returns it.
+  ['private_key_pem', 'TEXT'],
+ ],
  audit_log: [
   // Organization scoping (pass 2): the audit feed is read per organization, so
   // each entry records the organization it belongs to. Unlike the clinical
@@ -189,8 +199,10 @@ CREATE TABLE IF NOT EXISTS sign_offs (
 );
 CREATE TABLE IF NOT EXISTS signing_keys (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
+ org_id INTEGER REFERENCES organizations(id),
  fingerprint TEXT UNIQUE NOT NULL,
  public_key_pem TEXT NOT NULL,
+ private_key_pem TEXT,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -342,8 +354,10 @@ CREATE TABLE IF NOT EXISTS sign_offs (
 );
 CREATE TABLE IF NOT EXISTS signing_keys (
  id SERIAL PRIMARY KEY,
+ org_id INTEGER REFERENCES organizations(id),
  fingerprint TEXT UNIQUE NOT NULL,
  public_key_pem TEXT NOT NULL,
+ private_key_pem TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -409,6 +423,12 @@ const ORG_INDEXES = [
  'CREATE INDEX IF NOT EXISTS idx_clients_org ON clients(org_id)',
  'CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id)',
  'CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id)',
+ // Signing keys are looked up by organization (and by fingerprint when
+ // verifying). Deliberately NOT unique: signing_keys is append-only key
+ // history, so a key whose private material is unrecoverable can be superseded
+ // by a new row without ever deleting the public key that old signatures were
+ // made with.
+ 'CREATE INDEX IF NOT EXISTS idx_signing_keys_org ON signing_keys(org_id)',
 ];
 // Advisory-lock key that serializes Postgres boot (schema + organization
 // migration) across serverless instances. Arbitrary, but must never change:
