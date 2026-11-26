@@ -538,6 +538,15 @@ app.get('/api/verify/sign-off/:id', ah(async (req, res) => {
  // Deliberately NOT organization-scoped: this endpoint is unauthenticated by
  // design (a document recipient verifies a signature without an account) and
  // returns a minimal, PHI-free payload. See the note in the PR description.
+ //
+ // Organization scoping (pass 3): the payload used to include signatory_name,
+ // which meant an unauthenticated visitor could walk the sign-off ids and read
+ // the name of a signatory in ANY practice — and for a guardian sign-off that
+ // name is the client's parent, i.e. the family's identifying detail. The name
+ // is on the printed document the recipient already holds, so it is not needed
+ // here: everything below is a fact about the signature, not about a person or
+ // a client. (The authenticated /api/sign-offs/:id/verify still returns it,
+ // scoped to the caller's organization.)
  const row = await signOffById.get(Number(req.params.id));
  if (!row) return res.status(404).json({ error: 'Sign-off not found.' });
  const out = await verifySignOffRow(row);
@@ -546,7 +555,6 @@ app.get('/api/verify/sign-off/:id', ah(async (req, res) => {
   valid: out.result.valid, tampered: out.result.tampered,
   signed_at: out.result.signed_at, document_type: out.result.document_type,
   algorithm: out.result.algorithm, key_fingerprint: out.result.key_fingerprint,
-  signatory_name: out.result.signatory_name,
  });
 }));
 app.delete('/api/sign-offs/:id', ah(async (req, res) => {
