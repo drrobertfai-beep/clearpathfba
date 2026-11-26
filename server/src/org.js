@@ -163,6 +163,50 @@ export async function findProgressReportInOrg(id, user) {
  ).get(id, ...scope.params);
 }
 
+// --- Organizations (settings screen) ---------------------------------------
+/** Columns of an organizations row the settings screen reads. */
+const ORG_COLUMNS = 'id, name, slug, status, address_line, address_line2, city, state, postal_code, phone, fax, npi, credential_line, created_at';
+
+/**
+ * One organization the caller may touch, or null.
+ *
+ * The platform admin may name any organization (that is what the flag is for).
+ * Everyone else reaches exactly one organization — their own — and any other id
+ * answers null so the route returns 404, not 403: the same rule as every other
+ * scoped record, so organization ids cannot be enumerated.
+ */
+export async function findOrgForUser(user, orgId) {
+ const id = Number(orgId);
+ if (!Number.isInteger(id) || id < 1) return null;
+ if (!isPlatformAdmin(user)) {
+  const own = Number(user && user.org_id);
+  if (!Number.isInteger(own) || own !== id) return null;
+ }
+ return await db.prepare(`SELECT ${ORG_COLUMNS} FROM organizations WHERE id=?`).get(id);
+}
+
+/** Organizations the caller may choose from: all of them for a platform
+ *  admin, otherwise just their own (so the picker has nothing to pick). */
+export async function listOrgsForUser(user) {
+ if (isPlatformAdmin(user)) {
+  return await db.prepare(`SELECT ${ORG_COLUMNS} FROM organizations ORDER BY ${db.orderCi('name')}, id`).all();
+ }
+ const own = Number(user && user.org_id);
+ if (!Number.isInteger(own) || own < 1) return [];
+ return await db.prepare(`SELECT ${ORG_COLUMNS} FROM organizations WHERE id=?`).all(own);
+}
+
+/** The people in one organization, by username. Only ever called for an
+ *  organization the caller resolved through findOrgForUser. */
+export async function listOrgMembers(orgId) {
+ const id = Number(orgId);
+ if (!Number.isInteger(id) || id < 1) return [];
+ return await db.prepare(
+  `SELECT id, username, email, role, display_name, active, is_platform_admin, created_at, updated_at
+   FROM users WHERE org_id=? ORDER BY ${db.orderCi('username')}`,
+ ).all(id);
+}
+
 // --- Audit trail -----------------------------------------------------------
 /**
  * The supervision audit feed: the newest entries the caller may read.
