@@ -264,3 +264,28 @@
 @media(max-width:700px){.conn-ind{display:none}}
 .plans-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:8px}.plan-card{border:1px solid #dce8e5;border-radius:10px;padding:18px;background:#fcfefd;display:flex;flex-direction:column;gap:10px}.plan-name{display:flex;justify-content:space-between;align-items:baseline}.plan-name b{font-size:17px}.plan-price{color:#197d6b;font-weight:700;font-size:13px;white-space:nowrap}.plan-qty label{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:700;color:#3c5956}.plan-card .primary{margin-top:auto}.sub-status{display:flex;flex-wrap:wrap;gap:34px;margin:26px 0 6px;background:#f1f8f6;border:1px solid #dce8e5;border-radius:10px;padding:16px 18px}.sub-status small,.sub-status b{display:block}.sub-status small{font-size:11px;color:#78908b;margin-bottom:4px}.sub-status b{font-size:14px}.sub-status .status{margin-top:4px}.sub-note{margin:12px 0 0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 .conflict-panel{margin:12px 20px;padding:12px 16px;border:1px solid #e2a93b;background:#fff8e6;border-radius:8px}.conflict-row{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #ead9ad}.conflict-row span{flex:1}.conflict-row button{padding:5px 10px}
+
+/* ── Bootstrap / connecting state ─────────────────────────────────────────
+   Shown while the app cannot reach its backend yet (cold start, waking
+   database, flaky network) so a slow start never looks like a dead app. */
+.boot-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(circle at 50% 0%,#eaf5f2,#f5f8f7 60%)}
+.boot-card{background:#fff;border:1px solid #dce8e5;border-radius:16px;box-shadow:0 18px 40px -28px rgba(24,49,59,.45);padding:34px 32px;max-width:520px;width:100%;text-align:center}
+.boot-brand{display:flex;gap:10px;align-items:center;justify-content:center;margin-bottom:22px}
+.boot-brand .mark{width:30px;height:30px;border-radius:9px;background:#197d6b;color:#fff;display:grid;place-items:center;font-weight:800}
+.boot-brand strong{font-size:17px;letter-spacing:-.3px}
+.boot-brand strong span{color:#197d6b}
+.boot-card h1{font-size:21px;margin:16px 0 8px;letter-spacing:-.3px}
+.boot-card p{margin:0 0 10px;font-size:14px}
+.boot-spinner{display:block;width:34px;height:34px;margin:0 auto;border-radius:50%;border:3px solid #dce8e5;border-top-color:#197d6b;animation:boot-spin .9s linear infinite}
+.boot-spinner.small{width:20px;height:20px;border-width:2px;flex-shrink:0;margin:2px 0 0}
+.boot-warn{display:grid;place-items:center;width:34px;height:34px;margin:0 auto;border-radius:50%;background:#fdf0e2;color:#a9641c;font-weight:800;font-size:18px}
+@keyframes boot-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.boot-spinner{animation-duration:3s}}
+.boot-status{font-size:12px;color:#708782;font-variant-numeric:tabular-nums;margin:12px 0 0!important}
+.boot-actions{display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.boot-hint{font-size:12px;color:#8aa09b;margin-top:16px!important}
+.boot-notice{display:flex;gap:14px;align-items:flex-start;background:#fff;border:1px solid #dce8e5;border-left:4px solid #197d6b;border-radius:12px;padding:16px 18px;margin:0 0 16px}
+.boot-notice b{font-size:14px}
+.boot-notice p{font-size:13px;margin:4px 0 0}
+.boot-notice .small{margin-left:auto;flex-shrink:0}
+.boot-notice.compact{padding:11px 14px}
