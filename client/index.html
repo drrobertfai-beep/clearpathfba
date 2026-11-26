@@ -9,6 +9,77 @@
   <link rel="manifest" href="/manifest.webmanifest"/>
   <link rel="icon" type="image/png" href="/icon-192.png"/>
   <link rel="apple-touch-icon" href="/icon-192.png"/>
+  <!-- Boot guard. Plain (non-module) script so it runs even when the app's
+       hashed bundle is missing — the classic "blank page after a deploy" case,
+       where a cached shell points at JS/CSS that no longer exists. If the app
+       has not rendered in time, or a bundle fails to load, this replaces the
+       empty page with an honest message and a working recovery action. -->
+  <script>
+  (function(){
+    var TIMEOUT_MS=15000, RECOVER_KEY='clearpath_shell_recover_at', FONT='Inter,ui-sans-serif,system-ui,sans-serif';
+    function rootEl(){return document.getElementById('root')}
+    function recentRecover(){try{var t=Number(sessionStorage.getItem(RECOVER_KEY)||0);return !!t&&(Date.now()-t)<60000}catch(e){return false}}
+    function markRecover(){try{sessionStorage.setItem(RECOVER_KEY,String(Date.now()))}catch(e){}}
+    function clearSavedCopy(){
+      var jobs=[];
+      try{
+        if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){
+          jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){
+            return Promise.all(rs.map(function(r){return r.unregister()}));
+          }).catch(function(){}));
+        }
+      }catch(e){}
+      try{
+        if(window.caches&&caches.keys){
+          jobs.push(caches.keys().then(function(ks){
+            return Promise.all(ks.map(function(k){return caches.delete(k)}));
+          }).catch(function(){}));
+        }
+      }catch(e){}
+      return Promise.all(jobs);
+    }
+    function reload(){location.reload()}
+    function hardRecover(){markRecover();clearSavedCopy().then(reload,reload)}
+    function show(title,body){
+      var r=rootEl(); if(!r||r.getAttribute('data-boot-fallback')==='1')return;
+      r.setAttribute('data-boot-fallback','1');
+      r.innerHTML=
+        '<div style="max-width:560px;margin:12vh auto;padding:34px 30px;background:#fff;border:1px solid #dce8e5;border-radius:16px;text-align:center;font-family:'+FONT+';color:#18313b">'+
+          '<div style="font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#197d6b">ClearPathFBA</div>'+
+          '<h1 style="font-size:21px;margin:16px 0 8px;letter-spacing:-.3px">'+title+'</h1>'+
+          '<p style="font-size:14px;line-height:1.55;color:#5c7570;margin:0">'+body+'</p>'+
+          '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:22px">'+
+            '<button id="cp-boot-reload" style="font:600 14px '+FONT+';padding:10px 18px;border-radius:8px;border:0;background:#197d6b;color:#fff;cursor:pointer">Reload</button>'+
+            '<button id="cp-boot-clear" style="font:600 14px '+FONT+';padding:10px 18px;border-radius:8px;border:1px solid #cfe0dc;background:#fff;color:#18313b;cursor:pointer">Clear saved copy and reload</button>'+
+          '</div>'+
+          '<p style="font-size:12px;line-height:1.5;color:#8aa09b;margin:18px 0 0">Your workspace data is safe. Any data points recorded offline are still queued on this device.</p>'+
+        '</div>';
+      var a=document.getElementById('cp-boot-reload'), b=document.getElementById('cp-boot-clear');
+      if(a)a.onclick=reload;
+      if(b)b.onclick=hardRecover;
+    }
+    var SLOW='This is taking longer than expected. The app may be waking up, or your browser may be holding an old copy of it.';
+    function onTimeout(){
+      var r=rootEl();
+      if(r&&r.childElementCount>0)return;          // app rendered: nothing to do
+      if(navigator.onLine!==false&&navigator.serviceWorker&&navigator.serviceWorker.controller&&!recentRecover()){
+        hardRecover();                             // stale cached copy: swap it for the current one
+        return;
+      }
+      show('ClearPathFBA is not loading',SLOW);
+    }
+    window.addEventListener('error',function(e){
+      var t=e.target;
+      if(!t||t===window||t===document)return;
+      var tag=(t.tagName||'').toUpperCase();
+      if(tag!=='SCRIPT'&&tag!=='LINK')return;
+      if(navigator.onLine!==false&&!recentRecover()){hardRecover();return}
+      show('ClearPathFBA is not loading','A file the app needs could not be loaded'+(navigator.onLine===false?' because this device is offline':'')+'. Reconnect and reload to get the current version.');
+    },true);
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){setTimeout(onTimeout,TIMEOUT_MS)});
+    else setTimeout(onTimeout,TIMEOUT_MS);
+  })();
+  </script>
 </head>
 <body>
   <div id="root"></div>
