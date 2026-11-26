@@ -150,6 +150,24 @@ export async function findProgressReportInOrg(id, user) {
  ).get(id, ...scope.params);
 }
 
+// --- Audit trail -----------------------------------------------------------
+/**
+ * The supervision audit feed: the newest entries the caller may read.
+ *
+ * An organization's own admin gets their organization's entries and nothing
+ * else. A platform admin (users.is_platform_admin) gets every organization's
+ * entries plus the unattributed ones (org_id NULL: Stripe webhooks, and any
+ * legacy row the boot migration could not attribute). Because NULL never
+ * compares equal, an org admin's predicate excludes those rows — an unattributed
+ * entry is platform-admin-only rather than shared with every organization.
+ */
+export async function listAuditLogInOrg(user, limit = 100) {
+ const scope = orgPredicate(user, 'org_id');
+ return await db.prepare(
+  `SELECT * FROM audit_log WHERE ${scope.sql} ORDER BY id DESC LIMIT ?`,
+ ).all(...scope.params, limit);
+}
+
 // --- Users -----------------------------------------------------------------
 /** Users the caller may administer: their own organization, or all for a
  *  platform admin. User *management* (invitations, seat changes) is pass 2;

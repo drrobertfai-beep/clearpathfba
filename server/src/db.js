@@ -96,6 +96,17 @@ const migrations = {
   ['signature_key_fingerprint', 'TEXT'],
   ['signature_typed', 'TEXT'],
  ],
+ audit_log: [
+  // Organization scoping (pass 2): the audit feed is read per organization, so
+  // each entry records the organization it belongs to. Unlike the clinical
+  // tables (which reach their org through clients.org_id) this IS denormalized,
+  // because an audit entry must keep the organization it was written under even
+  // after the record it describes is deleted. logAudit fills it on every write;
+  // the boot migration backfills older rows. NULL means "no organization could
+  // be attributed" (e.g. a Stripe webhook), and those rows are visible only to a
+  // platform admin — never to an organization's own admin.
+  ['org_id', 'INTEGER REFERENCES organizations(id)'],
+ ],
 };
 
 const SQLITE_DDL = `
@@ -184,6 +195,7 @@ CREATE TABLE IF NOT EXISTS signing_keys (
 );
 CREATE TABLE IF NOT EXISTS audit_log (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
+ org_id INTEGER REFERENCES organizations(id),
  assessment_id INTEGER,
  actor TEXT,
  action TEXT,
@@ -336,6 +348,7 @@ CREATE TABLE IF NOT EXISTS signing_keys (
 );
 CREATE TABLE IF NOT EXISTS audit_log (
  id SERIAL PRIMARY KEY,
+ org_id INTEGER REFERENCES organizations(id),
  assessment_id INTEGER,
  actor TEXT,
  action TEXT,
@@ -395,6 +408,7 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
 const ORG_INDEXES = [
  'CREATE INDEX IF NOT EXISTS idx_clients_org ON clients(org_id)',
  'CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id)',
+ 'CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id)',
 ];
 // Advisory-lock key that serializes Postgres boot (schema + organization
 // migration) across serverless instances. Arbitrary, but must never change:
